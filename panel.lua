@@ -31,12 +31,12 @@ local C = {
     warn    = Color3.fromRGB(250, 190, 70),
 }
 local FONT, FONT_B = Enum.Font.GothamMedium, Enum.Font.GothamBold
-local WIN_W, WIN_H = 250, 240
+local WIN_W, WIN_H = 250, 254
 
 --// Settings (disimpan otomatis)
 local FILE = "panel_settings.json"
 local cfg = {
-    easy = false, stam = false, speed = false, mult = 1.1, qte = false, stamDelay = 60, gateT = 590,
+    easy = false, stam = false, speed = false, mult = 1.1, qGate = false, qStam = false, qDelay = 0, gateT = 590,
     light = false, tex = false, fx = false, tone = 0.6,
     wx = -1, wy = -1,
 }
@@ -50,7 +50,7 @@ pcall(function()
 end)
 cfg.mult = math.clamp(cfg.mult, 1.1, 1.5)
 cfg.tone = math.clamp(cfg.tone, 0.2, 1)
-cfg.stamDelay = math.clamp(cfg.stamDelay, 0, 250)
+cfg.qDelay = math.clamp(cfg.qDelay, -100, 100)
 cfg.gateT = math.clamp(cfg.gateT, 400, 800)
 local saveQueued = false
 local function save()
@@ -318,31 +318,45 @@ local function setSpeed(on)
     end
 end
 
--- Auto QTE (selalu Great, gak ada pilihan mood)
---  * Gate  : QTEGui.GateQTE (4 beat, frame BARU tiap beat) -> tap tepat GATE_T detik setelah frame muncul
---  * Corner: QTEGui.StaminaQTE -> tap pas pointer (Time) tepat di Star/Correct
---  * Legacy: QTEGui.SkillCheck (Pointer/SuccessLine)
--- Slider di tab QTE: Stamina Delay (ms setelah pointer nyentuh target) & Gate Time (ms setelah frame gate muncul)
--- dump gate: tap 0.49-0.69s setelah frame muncul = Great -> default 590ms. PanelDebug=true buat log.
-
-local fakeIn = {
-    UserInputType = Enum.UserInputType.Touch, UserInputState = Enum.UserInputState.Begin,
-    KeyCode = Enum.KeyCode.Unknown, Position = Vector3.zero, Delta = Vector3.zero,
-}
+--// ======================= AUTO QTE =======================
+-- Dua modul terpisah (toggle masing-masing). Event-driven: gak ada loop per-frame saat idle.
+--  * Gate   : QTEGui.GateQTE muncul di POSISI ACAK (4 beat, frame baru tiap beat). Tap harus kena lingkarannya,
+--             gateT ms setelah frame muncul (dump: tap 0.55-0.65s = Great). Pakai task.delay, nol biaya per-frame.
+--  * Stamina: QTEGui.StaminaQTE. Pointer (Time) muter ±265°/s searah jarum jam; Star (anak Timeframe, dipasang
+--             pakai Position lalu diputar bareng Timeframe) = titik Great (±10°). RenderStepped nyala HANYA selama
+--             satu QTE hidup (~1.5 dtk), lalu putus lagi.
+local GuiService = game:GetService("GuiService")
 local VIM = game:GetService("VirtualInputManager")
 
--- Fire langsung connection QTEButton (jalur yang dipakai stamina QTE: "QTEButton press Touch")
+local function centerOf(o) return o.AbsolutePosition + o.AbsoluteSize / 2 end
+local function absRot(o)
+    local ok, r = pcall(function() return o.AbsoluteRotation end)
+    return (ok and r) or o.Rotation
+end
+local function newInput(pos)
+    return {
+        UserInputType = Enum.UserInputType.Touch, UserInputState = Enum.UserInputState.Begin,
+        KeyCode = Enum.KeyCode.Unknown, Position = Vector3.new(pos.X, pos.Y, 0), Delta = Vector3.zero,
+    }
+end
+local function guiInset()
+    local ok, v = pcall(function() return GuiService:GetGuiInset() end)
+    return (ok and v) or Vector2.zero
+end
+
+--// ---- Cara kirim input (dicoba berurutan, yang berhasil diingat) ----
+-- Fire langsung connection QTEButton (jalur stamina QTE: "QTEButton press Touch")
 local function fireButton(b)
     if not (b and getconnections) then return false end
-    local any = false
-    for _, sig in ipairs({"InputBegan", "Activated", "MouseButton1Down", "MouseButton1Click", "TouchTap"}) do
-        local ok, cs = pcall(getconnections, b[sig])
+    local any, inp = false, newInput(centerOf(b))
+    for _, name in ipairs({"InputBegan", "Activated", "MouseButton1Down", "MouseButton1Click", "TouchTap"}) do
+        local ok, cs = pcall(getconnections, b[name])
         if ok and cs then
             for _, c in ipairs(cs) do
                 any = true
                 pcall(function()
-                    if sig == "InputBegan" then c:Fire(fakeIn, false)
-                    elseif sig == "Activated" then c:Fire(fakeIn, 1)
+                    if name == "InputBegan" then c:Fire(inp, false)
+                    elseif name == "Activated" then c:Fire(inp, 1)
                     else c:Fire() end
                 end)
             end
@@ -350,153 +364,135 @@ local function fireButton(b)
     end
     return any
 end
-
--- Gate QTE di dump = "INPUT Touch gp=false" (tap di area kosong, BUKAN lewat QTEButton).
--- Fire cuma handler UIS.InputBegan milik script QuickTimeEvent/QTEButton (gp=false), handler lain gak kesentuh.
-local function isQteFn(fn)
-    local ok, sc = pcall(function() return getfenv(fn).script end)
-    if ok and typeof(sc) == "Instance" then
-        local n = sc.Name:lower()
-        if n:find("quicktime") or n:find("qte") then return true end
-    end
-    local ok2, src = pcall(function() return debug.info(fn, "s") end)
-    if ok2 and type(src) == "string" then
-        local n = src:lower()
-        if n:find("quicktime") or n:find("qte") then return true end
-    end
-    return false
-end
-local function fireQteHandlers()
+-- Shotgun: fire semua handler UIS.InputBegan (Function-nya gak kebaca di Delta, jadi gak bisa difilter)
+local function fireAllUis(pos)
     if not getconnections then return false end
     local ok, cs = pcall(getconnections, UIS.InputBegan)
     if not (ok and cs) then return false end
-    local any = false
+    local inp, any = newInput(pos), false
     for _, c in ipairs(cs) do
-        local fn = c.Function
-        if fn and isQteFn(fn) then
-            any = true
-            pcall(function() c:Fire(fakeIn, false) end)
-        end
+        any = true
+        pcall(function() c:Fire(inp, false) end)
     end
-    dbg("uis handlers QTE:", any)
     return any
 end
-
--- Titik tap yang gak ketutup tombol GUI (biar gp=false)
-local function emptySpot()
-    local s = workspace.CurrentCamera.ViewportSize
-    local qg = playerGui:FindFirstChild("QTEGui")
-    local first
-    for _, p in ipairs({{0.5, 0.6}, {0.5, 0.45}, {0.35, 0.5}, {0.65, 0.5}, {0.5, 0.75}}) do
-        local x, y = s.X * p[1], s.Y * p[2]
-        first = first or Vector2.new(x, y)
-        local blocked = false
-        for _, g in ipairs(playerGui:GetGuiObjectsAtPosition(x, y)) do
-            if g.Visible and not (qg and g:IsDescendantOf(qg)) and (g:IsA("GuiButton") or g.Active) then
-                blocked = true
-                break
-            end
-        end
-        if not blocked then return x, y end
-    end
-    return first.X, first.Y
+local function vimTouch(x, y)
+    VIM:SendTouchEvent(7, 0, x, y)
+    task.wait(0.03)
+    VIM:SendTouchEvent(7, 2, x, y)
+    return true
 end
-
-local function fxCount(f)
-    local n = 0
-    for _, c in ipairs(f:GetChildren()) do if c.Name == "fx_ring" then n += 1 end end
-    return n
-end
-
 local METHODS = {
     btn = function(qb) return fireButton(qb) end,
-    uis = function() return fireQteHandlers() end,
-    touch = function()
-        local x, y = emptySpot()
-        VIM:SendTouchEvent(7, 0, x, y)
-        task.wait(0.03)
-        VIM:SendTouchEvent(7, 2, x, y)
-        return true
+    uis = function(_, pos) return fireAllUis(pos) end,
+    touch = function(_, pos) -- koordinat layar VIM = koordinat GUI + GuiInset
+        local i = guiInset()
+        return vimTouch(pos.X + i.X, pos.Y + i.Y)
     end,
-    mouse = function()
-        local x, y = emptySpot()
-        VIM:SendMouseButtonEvent(x, y, 0, true, game, 0)
-        task.wait(0.03)
-        VIM:SendMouseButtonEvent(x, y, 0, false, game, 0)
-        return true
+    touch0 = function(_, pos) -- tanpa inset (dicoba cuma kalau inset <> 0)
+        if guiInset().Magnitude < 1 then return false end
+        return vimTouch(pos.X, pos.Y)
     end,
-    key = function()
-        VIM:SendKeyEvent(true, Enum.KeyCode.Space, false, game)
+    mouse = function(_, pos)
+        local i = guiInset()
+        VIM:SendMouseButtonEvent(pos.X + i.X, pos.Y + i.Y, 0, true, game, 0)
         task.wait(0.03)
-        VIM:SendKeyEvent(false, Enum.KeyCode.Space, false, game)
+        VIM:SendMouseButtonEvent(pos.X + i.X, pos.Y + i.Y, 0, false, game, 0)
         return true
     end,
 }
 local ORDER = {
-    gate = {"btn", "uis", "touch", "mouse", "key"},
-    stam = {"btn", "uis", "touch", "mouse", "key"},
+    gate = {"touch", "touch0", "mouse", "uis", "btn"},
+    stam = {"btn", "touch", "touch0", "uis"},
 }
 local bestM = {gate = 1, stam = 1}
 
--- "diterima" = fx_ring baru muncul di frame QTE (game nge-spawn pas input masuk) atau frame diganti.
--- Cara yang berhasil diingat & dicoba duluan di beat berikutnya.
-local function tryPress(frame, kind, verify)
+-- "Diterima" = game nge-spawn fx_ring (di frame) / StaminaQTEState (di QTEGui) saat input masuk, atau frame diganti.
+-- Dipantau lewat event (bukan polling) dan cuma jalan pas ngirim input.
+local function press(frame, kind, pos)
     task.spawn(function()
+        local qg = frame.Parent
+        if not qg then return end
         local qb = playerGui:FindFirstChild("QTEButtonGui")
         qb = qb and qb:FindFirstChild("QTEButton")
+        pos = pos or (qb and centerOf(qb)) or (workspace.CurrentCamera.ViewportSize / 2)
+
+        local seen = false
+        local function onAdd(ch)
+            if ch.Name == "fx_ring" or ch.Name == "StaminaQTEState" then seen = true end
+        end
+        local c1, c2 = frame.ChildAdded:Connect(onAdd), qg.ChildAdded:Connect(onAdd)
+
         local order = ORDER[kind]
+        local done = false
         for k = 0, #order - 1 do
             local i = (bestM[kind] - 1 + k) % #order + 1
-            local n0 = verify and fxCount(frame) or 0
-            local ok, r = pcall(METHODS[order[i]], qb)
+            local ok, r = pcall(METHODS[order[i]], qb, pos)
             if ok and r then
-                if not verify then return end
-                local seen = false
                 for _ = 1, 6 do
+                    if seen or not frame.Parent then break end
                     task.wait()
-                    if not frame.Parent or fxCount(frame) > n0 then seen = true break end
                 end
-                if seen then
+                if seen or not frame.Parent then
                     bestM[kind] = i
+                    done = true
                     dbg("press ok", kind, order[i])
-                    return
+                    break
                 end
             end
         end
-        dbg("press: semua cara gagal", kind)
+        c1:Disconnect()
+        c2:Disconnect()
+        if not done then dbg("press: semua cara gagal", kind) end
     end)
 end
 
-local qSt = {}
-local function qReset() qSt = {} end
-
--- Frame QTE terbaru (tiap beat game bikin frame baru; yang lama bisa masih nyangkut)
-local function newestQte(qg)
-    local ch = qg:GetChildren()
-    for i = #ch, 1, -1 do
-        local c = ch[i]
-        if (c.Name == "GateQTE" or c.Name == "StaminaQTE") and c:IsA("GuiButton") then return c end
+--// ---- Watcher: pantau QTEGui.ChildAdded, tanpa loop ----
+-- Satu watcher per modul; QTEGui bisa di-recreate game, jadi tunggu + sambung ulang kalau perlu.
+local function makeWatcher(onFrame)
+    local alive, conns = false, {}
+    local function disconnectAll()
+        for _, c in ipairs(conns) do c:Disconnect() end
+        table.clear(conns)
+    end
+    local function attach(qg)
+        conns[#conns + 1] = qg.ChildAdded:Connect(function(ch)
+            if alive then pcall(onFrame, ch) end
+        end)
+        conns[#conns + 1] = qg.AncestryChanged:Connect(function(_, parent)
+            if parent == nil and alive then
+                disconnectAll()
+                task.spawn(function()
+                    local ng = playerGui:WaitForChild("QTEGui", 30)
+                    if ng and alive then attach(ng) end
+                end)
+            end
+        end)
+    end
+    return function(on)
+        if on == alive then return end
+        alive = on
+        if not on then disconnectAll(); return end
+        task.spawn(function()
+            local qg = playerGui:WaitForChild("QTEGui", 30)
+            if qg and alive then attach(qg) end
+        end)
     end
 end
 
-local function absRot(o)
-    local ok, r = pcall(function() return o.AbsoluteRotation end)
-    return (ok and r) or o.Rotation
-end
-local function centerOf(o) return o.AbsolutePosition + o.AbsoluteSize / 2 end
+--// ---- Modul 1: Gate QTE ----
+local gateSeen = setmetatable({}, {__mode = "k"})
+local setGate = makeWatcher(function(f)
+    if f.Name ~= "GateQTE" or not f:IsA("GuiButton") or gateSeen[f] then return end
+    gateSeen[f] = true
+    local t0 = os.clock()
+    dbg("gate beat")
+    task.delay(math.max(0, cfg.gateT / 1000 - (os.clock() - t0)), function()
+        if f.Parent then press(f, "gate", centerOf(f)) end -- tap di TENGAH lingkaran (posisi acak tiap beat)
+    end)
+end)
 
--- Sudut target (derajat, searah jarum jam dari atas). Star kecil yang dipasang pakai Position
--- (bukan diputar) dihitung dari posisinya terhadap pusat ring; selain itu pakai Rotation.
-local function targetAngle(tgt, ring)
-    local rs = math.max(ring.AbsoluteSize.X, ring.AbsoluteSize.Y)
-    local off = centerOf(tgt) - centerOf(ring)
-    local small = math.max(tgt.AbsoluteSize.X, tgt.AbsoluteSize.Y) < rs * 0.5
-    if small and off.Magnitude > rs * 0.12 then
-        return math.deg(math.atan2(off.X, -off.Y))
-    end
-    return absRot(tgt)
-end
-
+--// ---- Modul 2: Stamina QTE ----
 local function dumpQte(frame)
     warn("[Panel] ---- dump", frame.Name, frame.AbsolutePosition, frame.AbsoluteSize)
     local base = #frame:GetFullName() + 2
@@ -509,100 +505,76 @@ local function dumpQte(frame)
     end
 end
 
-local function gateStep(f)
-    if qSt.f ~= f then
-        qSt = {f = f, t0 = os.clock()}
-        dbg("gate beat")
+-- Satu sesi per frame: RenderStepped hidup cuma selama frame itu ada / belum ditekan.
+-- Tap = waktu perkiraan pointer nyentuh Star (<= setengah frame) + Timing offset.
+local function runStamina(frame)
+    local t0 = os.clock()
+    local tf, tm, star
+    local lastR, dir, spd, pressAt = nil, nil, 0, nil
+    local conn
+    local function stop()
+        if conn then conn:Disconnect(); conn = nil end
     end
-    if not qSt.done and os.clock() - qSt.t0 >= cfg.gateT / 1000 then
-        qSt.done = true
-        tryPress(f, "gate", true)
-    end
-end
-
--- Pointer muter (Rotation berubah) atau geser (posisi).
--- Perkiraan waktu pointer nyentuh target -> tap di waktu itu + Stamina Delay (biar gak kecepetan).
-local function trackStep(frame, ptr, tgt, ring, scale, dt, kind, verify)
-    if qSt.f ~= frame then
-        qSt = {f = frame, rot = false, spd = 0}
-        dbg("qte start")
-        if env.PanelDebug then dumpQte(frame) end
-    end
-    if qSt.done or dt <= 0 then return end
-    local now = os.clock()
-    local delay = cfg.stamDelay / 1000
-    if qSt.arrive then
-        if now >= qSt.arrive + delay then
-            qSt.done = true
-            tryPress(frame, kind, verify)
+    conn = RunService.RenderStepped:Connect(function(dt)
+        if not frame.Parent then return stop() end
+        if dt <= 0 then return end
+        local now = os.clock()
+        if not star then -- anak-anaknya dibuat sesaat setelah frame; tunggu sampai lengkap
+            tf, tm = frame:FindFirstChild("Timeframe"), frame:FindFirstChild("Time")
+            star = tf and tf:FindFirstChild("Star")
+            if not star then
+                if now - t0 > 1 then stop() end
+                return
+            end
+            dbg("qte start")
+            if env.PanelDebug then dumpQte(frame) end
         end
-        return
-    end
-    local pr = absRot(ptr)
-    local dist = (centerOf(tgt) - centerOf(ptr)).Magnitude
-    if qSt.lastR == nil then qSt.lastR, qSt.lastD = pr, dist; return end
-    local dR = (pr - qSt.lastR + 540) % 360 - 180
-    local closing = (qSt.lastD - dist) / dt
-    qSt.lastR, qSt.lastD = pr, dist
-    if math.abs(dR) > 0.05 then qSt.rot = true end
+        if not (tm and tm.Parent) then return stop() end -- pointer hilang = QTE selesai
 
-    local tc -- detik sampai pointer di target (negatif = baru lewat)
-    if qSt.rot then
-        if dR ~= 0 then
-            qSt.dir = dR > 0 and 1 or -1
-            local inst = math.abs(dR) / dt
-            qSt.spd = qSt.spd == 0 and inst or (qSt.spd * 0.7 + inst * 0.3)
-        end
-        if not qSt.dir or qSt.spd < 5 then return end
-        local remain = ((targetAngle(tgt, ring) - pr) * qSt.dir) % 360
-        if remain > 180 then remain -= 360 end -- negatif = udah lewat
-        tc = remain / qSt.spd
-        if tc < -0.15 then return end -- kejauhan lewat, tunggu putaran berikutnya
-    else
-        if closing > 5 then
-            qSt.near = math.min(qSt.near or math.huge, dist)
-            tc = dist / closing
-        elseif qSt.near and qSt.near < scale * 0.08 and closing < 0 then
-            tc = 0
-        else
+        if pressAt then
+            if now >= pressAt - dt * 0.5 then
+                stop()
+                press(frame, "stam")
+            end
             return
         end
-    end
-    if tc <= dt * 0.5 then qSt.arrive = now + math.max(tc, -0.15) end
+
+        local pr = absRot(tm)
+        if not lastR then lastR = pr; return end
+        local dR = (pr - lastR + 540) % 360 - 180
+        lastR = pr
+        if dR ~= 0 then
+            dir = dR > 0 and 1 or -1
+            local inst = math.abs(dR) / dt
+            spd = spd == 0 and inst or (spd * 0.7 + inst * 0.3)
+        end
+        -- tunggu intro (0.25s). Kalau Star keburu lewat saat intro, tunggu putaran berikutnya (maks ~1.6s)
+        if now - t0 < 0.25 or not dir or spd < 20 then return end
+
+        local v = centerOf(star) - centerOf(tf)
+        if v.Magnitude < 1 then return end
+        local target = math.deg(math.atan2(v.X, -v.Y)) -- derajat searah jarum jam dari atas
+        local remain = ((target - pr) * dir) % 360
+        if remain > 360 - spd * dt * 1.5 then remain -= 360 end -- baru lewat <= 1.5 frame -> negatif
+        local tc = remain / spd -- detik sampai pointer di Star
+        local delay = cfg.qDelay / 1000
+        if tc <= dt * 0.5 + math.max(0, -delay) then
+            pressAt = now + tc + delay
+            if now >= pressAt - dt * 0.5 then
+                stop()
+                press(frame, "stam")
+            end
+        end
+    end)
+    task.delay(4, stop) -- pengaman: jangan sampai connection nyangkut
 end
 
-local qteStep = safe(function(dt)
-    local qg = playerGui:FindFirstChild("QTEGui")
-    if not (qg and qg.Enabled) then
-        if qSt.f then qReset() end
-        return
-    end
-    local q = newestQte(qg)
-    if q and q.Name == "GateQTE" then return gateStep(q) end
-    if q then
-        local tf, tm = q:FindFirstChild("Timeframe"), q:FindFirstChild("Time")
-        local star = tf and tf:FindFirstChild("Star")
-        local tgt = (star and star.Visible and star.AbsoluteSize.X > 0) and star or (tf and tf:FindFirstChild("Correct"))
-        if tm and tgt then
-            return trackStep(q, tm, tgt, tf, math.max(q.AbsoluteSize.X, q.AbsoluteSize.Y), dt, "stam", true)
-        end
-        return
-    end
-    local sc = qg:FindFirstChild("SkillCheck")
-    if sc and sc.Visible then
-        local ptr, line = sc:FindFirstChild("Pointer"), sc:FindFirstChild("SuccessLine")
-        if ptr and line then
-            trackStep(sc, ptr, line, sc, math.max(sc.AbsoluteSize.X, sc.AbsoluteSize.Y), dt, "stam", false)
-        end
-    elseif qSt.f then
-        qReset()
-    end
+local stamSeen = setmetatable({}, {__mode = "k"})
+local setStam = makeWatcher(function(f)
+    if f.Name ~= "StaminaQTE" or not f:IsA("GuiButton") or stamSeen[f] then return end
+    stamSeen[f] = true
+    runStamina(f)
 end)
-local setQteLoop = hook(RunService.RenderStepped, qteStep)
-local function setQte(on)
-    qReset()
-    setQteLoop(on)
-end
 
 --// ======================= VISUAL =======================
 local G = {light = false, tex = false, fx = false} -- state runtime
@@ -1279,14 +1251,15 @@ makeSlider(pages.Main, "Multiplier", 1.1, 1.5, 0.05, cfg.mult,
         if v ~= cfg.mult then cfg.mult = v; save() end
     end)
 
--- Tab QTE
-makeToggle(pages.QTE, "Auto QTE", cfg.qte, function(v) apply("qte", v, setQte) end)
-makeSlider(pages.QTE, "Stamina Delay (naik = lebih telat)", 0, 250, 10, cfg.stamDelay,
-    function(v) return string.format("%dms", v) end,
-    function(v) if v ~= cfg.stamDelay then cfg.stamDelay = v; save() end end)
-makeSlider(pages.QTE, "Gate Time (tap setelah muncul)", 400, 800, 10, cfg.gateT,
+-- Tab QTE (dua modul terpisah)
+makeToggle(pages.QTE, "Auto Gate QTE", cfg.qGate, function(v) apply("qGate", v, setGate) end)
+makeSlider(pages.QTE, "Gate Time", 400, 800, 10, cfg.gateT,
     function(v) return string.format("%dms", v) end,
     function(v) if v ~= cfg.gateT then cfg.gateT = v; save() end end)
+makeToggle(pages.QTE, "Auto Stamina QTE", cfg.qStam, function(v) apply("qStam", v, setStam) end)
+makeSlider(pages.QTE, "Timing (- awal / + telat)", -100, 100, 5, cfg.qDelay,
+    function(v) return string.format("%+dms", v) end,
+    function(v) if v ~= cfg.qDelay then cfg.qDelay = v; save() end end)
 
 -- Tab Visual
 makeToggle(pages.Visual, "Soft Light & Color", cfg.light, function(v) apply("light", v, setLight) end)
@@ -1347,7 +1320,8 @@ local function cleanup()
     setStamina(false)
     setEasy(false)
     setSpeed(false)
-    setQte(false)
+    setGate(false)
+    setStam(false)
     setLight(false)
     setTex(false)
     setFx(false)
@@ -1361,7 +1335,8 @@ closeBtn.Activated:Connect(cleanup)
 if cfg.easy then setActive("easy", true); setEasy(true) end
 if cfg.stam then setActive("stam", true); setStamina(true) end
 if cfg.speed then setActive("speed", true); setSpeed(true) end
-if cfg.qte then setActive("qte", true); setQte(true) end
+if cfg.qGate then setActive("qGate", true); setGate(true) end
+if cfg.qStam then setActive("qStam", true); setStam(true) end
 if cfg.light then setActive("light", true); setLight(true) end
 if cfg.tex then setActive("tex", true); setTex(true) end
 if cfg.fx then setActive("fx", true); setFx(true) end
