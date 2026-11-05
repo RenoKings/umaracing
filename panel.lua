@@ -1,4 +1,4 @@
---// Panel v19 — Presets · Easy Control · Stamina (Off/Semi/Infinite) · Speed Boost · Auto QTE · Visual
+--// Panel v17 — Easy Control · Infinite Stamina · Speed Boost · Visual (low graphics / soft color)
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UIS = game:GetService("UserInputService")
@@ -31,28 +31,13 @@ local C = {
     warn    = Color3.fromRGB(250, 190, 70),
 }
 local FONT, FONT_B = Enum.Font.GothamMedium, Enum.Font.GothamBold
-local WIN_W, WIN_H = 260, 320
-
--- Preset (edit di sini kalau mau ganti nilai). sm: 0 = Off, 1 = Semi, 2 = Infinite
-local PRESETS = {
-    {name = "Safe",   easy = true, sm = 0, mult = 1.50, col = C.ok},
-    {name = "Medium", easy = true, sm = 0, mult = 1.10, col = C.warn},
-    {name = "Semi",   easy = true, sm = 1, mult = 1.10, col = C.accent},
-    {name = "Aggro",  easy = true, sm = 2, mult = 1.25, col = C.danger}, -- cuma sesekali, rawan kedeteksi
-}
--- Semi Infinity: stamina TIDAK beneran infinite, cuma boros lebih lambat + isi lebih cepat
-local SEMI_USE, SEMI_REGEN = 0.45, 1.8
--- Auto Stamina QTE: detik "maju" dari titik bintang (kompensasi jalur input + urutan render)
-local STAM_LEAD = 0.03
--- Auto Gate QTE: detik setelah lingkaran muncul (dump: 0.48-0.69s = Great, tengahnya ~0.58)
-local GATE_T = 0.58
+local WIN_W, WIN_H = 250, 254
 
 --// Settings (disimpan otomatis)
 local FILE = "panel_settings.json"
 local cfg = {
-    easy = false, sm = 0, speed = false, mult = 1.1, qGate = false, qStam = false,
+    easy = false, stam = false, speed = false, mult = 1.1, qGate = false, qStam = false, qDelay = 0, gateT = 590,
     light = false, tex = false, fx = false, tone = 0.6,
-    preset = "",
     wx = -1, wy = -1,
 }
 pcall(function()
@@ -65,7 +50,8 @@ pcall(function()
 end)
 cfg.mult = math.clamp(cfg.mult, 1.1, 1.5)
 cfg.tone = math.clamp(cfg.tone, 0.2, 1)
-cfg.sm = math.clamp(math.floor(cfg.sm), 0, 2)
+cfg.qDelay = math.clamp(cfg.qDelay, -100, 100)
+cfg.gateT = math.clamp(cfg.gateT, 400, 800)
 local saveQueued = false
 local function save()
     if saveQueued then return end
@@ -170,41 +156,9 @@ local function ensure()
     if #cfgs == 0 and os.clock() - scanAt > scanGap then scan() end
 end
 
--- Stamina: mode 0 = Off, 1 = Semi (boros lebih lambat + isi lebih cepat), 2 = Infinite
--- Config sprint ditemukan lewat getgc. Nilai asli dicatat per tabel (ratio Current/Base juga) supaya bisa dipulihkan.
-local stO = setmetatable({}, {__mode = "k"})
-local stamMode = 0
-local function patchCfg(t, mode)
-    local o = stO[t]
-    if not o then
-        local bu, cu = rawget(t, "BaseStaminaUseRate"), rawget(t, "CurrentStaminaUseRate")
-        if type(bu) ~= "number" or type(cu) ~= "number" or bu == 0 then return end
-        local br = rawget(t, "BaseStaminaRegenRate")
-        o = {use = bu, ratio = cu / bu, regen = type(br) == "number" and br or nil}
-        stO[t] = o
-    end
-    local ku = (mode == 2) and 0 or SEMI_USE
-    local bu = o.use * ku
-    if rawget(t, "BaseStaminaUseRate") ~= bu then pcall(rawset, t, "BaseStaminaUseRate", bu) end
-    local cu = bu * o.ratio
-    if rawget(t, "CurrentStaminaUseRate") ~= cu then pcall(rawset, t, "CurrentStaminaUseRate", cu) end
-    if mode == 1 and o.regen then
-        local r = o.regen * SEMI_REGEN
-        if rawget(t, "BaseStaminaRegenRate") ~= r then pcall(rawset, t, "BaseStaminaRegenRate", r) end
-    elseif mode == 2 and o.regen and rawget(t, "BaseStaminaRegenRate") ~= o.regen then
-        pcall(rawset, t, "BaseStaminaRegenRate", o.regen)
-    end
-end
-local function restoreCfg()
-    for t, o in pairs(stO) do
-        pcall(rawset, t, "BaseStaminaUseRate", o.use)
-        pcall(rawset, t, "CurrentStaminaUseRate", o.use * o.ratio)
-        if o.regen then pcall(rawset, t, "BaseStaminaRegenRate", o.regen) end
-    end
-    stO = setmetatable({}, {__mode = "k"})
-end
-
--- Infinite saja: HUD (lastStamina) turun padahal sudah di-patch -> race baru / config baru -> scan ulang.
+-- Infinite Stamina
+-- Race baru = config sprint baru. Deteksi: HUD (lastStamina) bilang stamina turun padahal sudah di-patch -> scan ulang.
+local origRate = setmetatable({}, {__mode = "k"})
 local drainT, drainGap = 0, 2
 local function stamLow()
     for _, t in ipairs(vis) do
@@ -213,17 +167,19 @@ local function stamLow()
     end
     return false
 end
-local leakAt = 0 -- terakhir server ngirim stamina < max padahal Infinite aktif
+local leakAt = 0 -- terakhir server ngirim stamina < max padahal fitur aktif
 local stWatch, stConn, stamEvConn
 local function watchStamina(st, mx)
     if stWatch == st then return end
     if stConn then stConn:Disconnect() end
     stWatch = st
+    -- begitu ada yang nurunin nilainya, langsung dibalikin (gak nunggu frame berikutnya)
     stConn = st:GetPropertyChangedSignal("Value"):Connect(function()
         if st.Value < mx.Value then st.Value = mx.Value end
     end)
 end
-local evGap = 1.5
+-- Server ngirim stamina lewat UpdateClientStamina: kalau nilainya turun = lagi nguras -> scan ulang (tanpa nunggu timer)
+local evGap = 1.5 -- jarak scan dari event; makin jauh kalau nguras terus (server-side) biar gak lag
 local onStamEvent = safe(function(v)
     local info = player:FindFirstChild("Info")
     local mx = info and info:FindFirstChild("MaxStamina")
@@ -237,39 +193,45 @@ end)
 local stAcc, infoSt, infoMx = 0, nil, nil
 local setStamLoop = hook(RunService.Heartbeat, function(dt)
     stAcc += dt
-    if stAcc < 0.15 then return end
+    if stAcc < 0.15 then return end -- Changed-signal sudah balikin stamina instan; loop cuma buat patch config
     dt, stAcc = stAcc, 0
     ensure()
-    for i = 1, #cfgs do patchCfg(cfgs[i], stamMode) end
-    if stamMode == 2 then
-        if not (infoSt and infoSt.Parent and infoMx and infoMx.Parent) then
-            local info = player:FindFirstChild("Info")
-            infoSt = info and info:FindFirstChild("Stamina")
-            infoMx = info and info:FindFirstChild("MaxStamina")
+    for i = 1, #cfgs do
+        local t = cfgs[i]
+        -- tulis cuma kalau nilainya belum 0 (tanpa closure per frame)
+        if rawget(t, "BaseStaminaUseRate") ~= 0 or rawget(t, "CurrentStaminaUseRate") ~= 0 then
+            if origRate[t] == nil then origRate[t] = rawget(t, "BaseStaminaUseRate") end
+            pcall(rawset, t, "BaseStaminaUseRate", 0)
+            pcall(rawset, t, "CurrentStaminaUseRate", 0)
         end
-        local st, mx = infoSt, infoMx
-        if os.clock() - leakAt > 5 then evGap = 1.5 end
-        if st and mx then
-            watchStamina(st, mx)
-            if st.Value < mx.Value then st.Value = mx.Value end
+    end
+    if not (infoSt and infoSt.Parent and infoMx and infoMx.Parent) then
+        local info = player:FindFirstChild("Info")
+        infoSt = info and info:FindFirstChild("Stamina")
+        infoMx = info and info:FindFirstChild("MaxStamina")
+    end
+    local st, mx = infoSt, infoMx
+    if os.clock() - leakAt > 5 then evGap = 1.5 end
+    if st and mx then
+        watchStamina(st, mx)
+        if st.Value < mx.Value then st.Value = mx.Value end
+    end
+
+    if stamLow() then
+        drainT += dt
+        if drainT > 0.7 and os.clock() - scanAt > drainGap then
+            drainT = 0
+            drainGap = math.min(drainGap * 2, 20)
+            scan()
         end
-        if stamLow() then
-            drainT += dt
-            if drainT > 0.7 and os.clock() - scanAt > drainGap then
-                drainT = 0
-                drainGap = math.min(drainGap * 2, 20)
-                scan()
-            end
-        else
-            drainT, drainGap = 0, 2
-        end
+    else
+        drainT, drainGap = 0, 2
     end
     if os.clock() - scanAt > 30 then scan() end
 end)
-local function setStamina(m)
-    stamMode = m
-    setStamLoop(m > 0)
-    if m == 2 then
+local function setStamina(on)
+    setStamLoop(on)
+    if on then
         if not stamEvConn then
             local rem = game:GetService("ReplicatedStorage"):FindFirstChild("remotes")
             local ev = rem and rem:FindFirstChild("UpdateClientStamina")
@@ -279,8 +241,8 @@ local function setStamina(m)
         if stamEvConn then stamEvConn:Disconnect(); stamEvConn = nil end
         if stConn then stConn:Disconnect(); stConn = nil; stWatch = nil end
         drainT, drainGap = 0, 2
+        for t, v in pairs(origRate) do pcall(function() t.BaseStaminaUseRate = v end) end
     end
-    if m == 0 then restoreCfg() end
 end
 
 -- Easy Control: karakter ngadep arah kamera
@@ -358,8 +320,8 @@ end
 
 --// ======================= AUTO QTE =======================
 -- Dua modul terpisah (toggle masing-masing). Event-driven: gak ada loop per-frame saat idle.
---  * Gate   : QTEGui.GateQTE muncul tiap beat (4x). Tap di tengah lingkaran GATE_T detik setelah muncul
---             (dump: 0.48-0.69s = Great). Pakai task.delay, nol biaya per-frame.
+--  * Gate   : QTEGui.GateQTE muncul di POSISI ACAK (4 beat, frame baru tiap beat). Tap harus kena lingkarannya,
+--             gateT ms setelah frame muncul (dump: tap 0.55-0.65s = Great). Pakai task.delay, nol biaya per-frame.
 --  * Stamina: QTEGui.StaminaQTE. Pointer (Time) muter ±265°/s searah jarum jam; Star (anak Timeframe, dipasang
 --             pakai Position lalu diputar bareng Timeframe) = titik Great (±10°). RenderStepped nyala HANYA selama
 --             satu QTE hidup (~1.5 dtk), lalu putus lagi.
@@ -381,9 +343,6 @@ local function guiInset()
     local ok, v = pcall(function() return GuiService:GetGuiInset() end)
     return (ok and v) or Vector2.zero
 end
-
--- Hitung tap otomatis yang diterima game (ditampilkan di tab QTE)
-local qCount, qLabel = {gate = 0, stam = 0}, {}
 
 --// ---- Cara kirim input (dicoba berurutan, yang berhasil diingat) ----
 -- Fire langsung connection QTEButton (jalur stamina QTE: "QTEButton press Touch")
@@ -426,11 +385,6 @@ end
 local METHODS = {
     btn = function(qb) return fireButton(qb) end,
     uis = function(_, pos) return fireAllUis(pos) end,
-    uisI = function(_, pos) -- sama seperti uis tapi posisi + inset (kalau game bandingin ke koordinat layar)
-        local i = guiInset()
-        if i.Magnitude < 1 then return false end
-        return fireAllUis(pos + i)
-    end,
     touch = function(_, pos) -- koordinat layar VIM = koordinat GUI + GuiInset
         local i = guiInset()
         return vimTouch(pos.X + i.X, pos.Y + i.Y)
@@ -448,7 +402,7 @@ local METHODS = {
     end,
 }
 local ORDER = {
-    gate = {"uis", "uisI", "touch", "touch0", "mouse", "btn"},
+    gate = {"touch", "touch0", "mouse", "uis", "btn"},
     stam = {"btn", "touch", "touch0", "uis"},
 }
 local bestM = {gate = 1, stam = 1}
@@ -482,9 +436,6 @@ local function press(frame, kind, pos)
                 if seen or not frame.Parent then
                     bestM[kind] = i
                     done = true
-                    qCount[kind] += 1
-                    local lb = qLabel[kind]
-                    if lb then lb.Text = qCount[kind] .. " tap" end
                     dbg("press ok", kind, order[i])
                     break
                 end
@@ -530,34 +481,14 @@ local function makeWatcher(onFrame)
 end
 
 --// ---- Modul 1: Gate QTE ----
--- Titik tap = tengah lingkaran sebenarnya (median pusat child Background/Duration/Overlay/Input).
--- Frame GateQTE sendiri punya UIAspectRatioConstraint & ukuran {1,0},{1,0} -> pusat frame BUKAN pusat tombol.
-local function gateTarget(f)
-    local xs, ys = {}, {}
-    for _, n in ipairs({"Background", "Duration", "Overlay", "Input"}) do
-        local o = f:FindFirstChild(n)
-        if o and o:IsA("GuiObject") and o.AbsoluteSize.X > 4 and o.AbsoluteSize.Y > 4 then
-            local c = centerOf(o)
-            xs[#xs + 1], ys[#ys + 1] = c.X, c.Y
-        end
-    end
-    if #xs == 0 then return centerOf(f) end
-    table.sort(xs); table.sort(ys)
-    local m = (#xs + 1) // 2
-    local x = (#xs % 2 == 1) and xs[m] or (xs[m] + xs[m + 1]) / 2
-    local y = (#ys % 2 == 1) and ys[m] or (ys[m] + ys[m + 1]) / 2
-    dbg("gate target", math.floor(x), math.floor(y), "frame", centerOf(f))
-    return Vector2.new(x, y)
-end
-
 local gateSeen = setmetatable({}, {__mode = "k"})
 local setGate = makeWatcher(function(f)
     if f.Name ~= "GateQTE" or not f:IsA("GuiButton") or gateSeen[f] then return end
     gateSeen[f] = true
     local t0 = os.clock()
     dbg("gate beat")
-    task.delay(math.max(0, GATE_T - (os.clock() - t0)), function()
-        if f.Parent then press(f, "gate", gateTarget(f)) end
+    task.delay(math.max(0, cfg.gateT / 1000 - (os.clock() - t0)), function()
+        if f.Parent then press(f, "gate", centerOf(f)) end -- tap di TENGAH lingkaran (posisi acak tiap beat)
     end)
 end)
 
@@ -574,23 +505,21 @@ local function dumpQte(frame)
     end
 end
 
--- Satu sesi per frame, RenderStepped hidup cuma selama QTE.
--- Dibanding v18: tanpa jeda intro 0.25s, kecepatan pointer diukur dari jendela 0.2s (tanpa smoothing yang
--- bikin lag), sudut Star ikut diputar sesuai rotasi Timeframe (AbsolutePosition mengabaikan rotasi),
--- dan tap ditembakkan STAM_LEAD detik lebih awal buat nutup delay input.
+-- Satu sesi per frame: RenderStepped hidup cuma selama frame itu ada / belum ditekan.
+-- Tap = waktu perkiraan pointer nyentuh Star (<= setengah frame) + Timing offset.
 local function runStamina(frame)
     local t0 = os.clock()
     local tf, tm, star
-    local hist, unw, lastR = {}, 0, nil
-    local conn, fired = nil, false
+    local lastR, dir, spd, pressAt = nil, nil, 0, nil
+    local conn
     local function stop()
         if conn then conn:Disconnect(); conn = nil end
     end
     conn = RunService.RenderStepped:Connect(function(dt)
-        if fired then return stop() end
         if not frame.Parent then return stop() end
+        if dt <= 0 then return end
         local now = os.clock()
-        if not star then
+        if not star then -- anak-anaknya dibuat sesaat setelah frame; tunggu sampai lengkap
             tf, tm = frame:FindFirstChild("Timeframe"), frame:FindFirstChild("Time")
             star = tf and tf:FindFirstChild("Star")
             if not star then
@@ -600,35 +529,44 @@ local function runStamina(frame)
             dbg("qte start")
             if env.PanelDebug then dumpQte(frame) end
         end
-        if not (tm and tm.Parent) then return stop() end
+        if not (tm and tm.Parent) then return stop() end -- pointer hilang = QTE selesai
+
+        if pressAt then
+            if now >= pressAt - dt * 0.5 then
+                stop()
+                press(frame, "stam")
+            end
+            return
+        end
 
         local pr = absRot(tm)
-        if lastR then unw += (pr - lastR + 540) % 360 - 180 end
+        if not lastR then lastR = pr; return end
+        local dR = (pr - lastR + 540) % 360 - 180
         lastR = pr
-        hist[#hist + 1] = {now, unw}
-        while #hist > 2 and now - hist[1][1] > 0.2 do table.remove(hist, 1) end
-        if #hist < 3 then return end
-        local span = now - hist[1][1]
-        if span < 0.04 then return end
-        local rate = (unw - hist[1][2]) / span -- derajat/detik, bertanda
-        if math.abs(rate) < 60 then return end
-        local dir, spd = rate > 0 and 1 or -1, math.abs(rate)
+        if dR ~= 0 then
+            dir = dR > 0 and 1 or -1
+            local inst = math.abs(dR) / dt
+            spd = spd == 0 and inst or (spd * 0.7 + inst * 0.3)
+        end
+        -- tunggu intro (0.25s). Kalau Star keburu lewat saat intro, tunggu putaran berikutnya (maks ~1.6s)
+        if now - t0 < 0.25 or not dir or spd < 20 then return end
 
         local v = centerOf(star) - centerOf(tf)
         if v.Magnitude < 1 then return end
-        local target = math.deg(math.atan2(v.X, -v.Y))
-        if env.PanelStarRot ~= false then target += absRot(tf) end
+        local target = math.deg(math.atan2(v.X, -v.Y)) -- derajat searah jarum jam dari atas
         local remain = ((target - pr) * dir) % 360
-        if remain > 360 - spd * dt * 1.5 then remain -= 360 end
-        local lead = env.PanelLead or STAM_LEAD
-        if remain / spd <= lead + dt * 0.5 then
-            fired = true
-            stop()
-            dbg("qte fire", string.format("rate=%.0f remain=%.1f", rate, remain))
-            press(frame, "stam")
+        if remain > 360 - spd * dt * 1.5 then remain -= 360 end -- baru lewat <= 1.5 frame -> negatif
+        local tc = remain / spd -- detik sampai pointer di Star
+        local delay = cfg.qDelay / 1000
+        if tc <= dt * 0.5 + math.max(0, -delay) then
+            pressAt = now + tc + delay
+            if now >= pressAt - dt * 0.5 then
+                stop()
+                press(frame, "stam")
+            end
         end
     end)
-    task.delay(4, stop)
+    task.delay(4, stop) -- pengaman: jangan sampai connection nyangkut
 end
 
 local stamSeen = setmetatable({}, {__mode = "k"})
@@ -986,17 +924,13 @@ end
 local window = new("Frame", {
     Name = "Window",
     Size = UDim2.fromOffset(WIN_W, WIN_H),
-    BackgroundColor3 = Color3.new(1, 1, 1),
-    BackgroundTransparency = 0.02,
+    BackgroundColor3 = C.bg,
+    BackgroundTransparency = 0.03,
     BorderSizePixel = 0,
 }, gui)
 round(window, 14)
 new("UIStroke", {Color = C.stroke, Thickness = 1}, window)
 local winScale = new("UIScale", {Scale = 1}, window)
-new("UIGradient", {
-    Color = ColorSequence.new(Color3.fromRGB(24, 24, 32), Color3.fromRGB(13, 13, 18)),
-    Rotation = 90,
-}, window)
 do
     local x, y
     if cfg.wx >= 0 and cfg.wy >= 0 then
@@ -1090,9 +1024,9 @@ local function restore()
     pop(winScale)
 end
 
--- Header: logo + judul + minimize + close
+-- Header: tab + minimize + close
 local header = new("Frame", {
-    Size = UDim2.new(1, 0, 0, 36),
+    Size = UDim2.new(1, 0, 0, 38),
     BackgroundTransparency = 1,
     Active = true,
 }, window)
@@ -1102,152 +1036,88 @@ draggable(header, window, nil, function()
 end)
 draggable(bubble, bubble, restore)
 
-local closeBtn
-do
-    local logo = new("Frame", {
-        Size = UDim2.fromOffset(20, 20),
-        Position = UDim2.fromOffset(12, 8),
-        BackgroundColor3 = Color3.new(1, 1, 1),
+local tabBar = new("Frame", {
+    Size = UDim2.new(1, -84, 0, 26),
+    Position = UDim2.fromOffset(10, 6),
+    BackgroundColor3 = C.surface,
+    BorderSizePixel = 0,
+}, header)
+round(tabBar, 8)
+
+local function headerBtn(text, x, hoverColor)
+    local b = new("TextButton", {
+        Size = UDim2.fromOffset(26, 26),
+        Position = UDim2.new(1, x, 0, 6),
+        BackgroundColor3 = C.surface,
         BorderSizePixel = 0,
+        AutoButtonColor = false,
+        Text = text,
+        TextColor3 = C.sub,
+        Font = FONT_B,
+        TextSize = 18,
     }, header)
-    round(logo, 6)
-    new("UIGradient", {Color = ColorSequence.new(C.accent, C.accent2), Rotation = 45}, logo)
-    new("TextLabel", {
-        Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Text = "P",
-        TextColor3 = Color3.new(1, 1, 1), Font = FONT_B, TextSize = 13,
-    }, logo)
-    new("TextLabel", {
-        Size = UDim2.fromOffset(50, 36), Position = UDim2.fromOffset(38, 0), BackgroundTransparency = 1,
-        Text = "Panel", TextColor3 = C.text, Font = FONT_B, TextSize = 14, TextXAlignment = Enum.TextXAlignment.Left,
-    }, header)
-    local ver = new("TextLabel", {
-        Size = UDim2.fromOffset(30, 16), Position = UDim2.fromOffset(86, 10),
-        BackgroundColor3 = C.surface, BorderSizePixel = 0,
-        Text = "v18", TextColor3 = C.sub, Font = FONT, TextSize = 10,
-    }, header)
-    round(ver, 8)
-
-    local function headerBtn(text, x, hoverColor)
-        local b = new("TextButton", {
-            Size = UDim2.fromOffset(24, 24),
-            Position = UDim2.new(1, x, 0, 6),
-            BackgroundColor3 = C.surface,
-            BorderSizePixel = 0,
-            AutoButtonColor = false,
-            Text = text,
-            TextColor3 = C.sub,
-            Font = FONT_B,
-            TextSize = 16,
-        }, header)
-        round(b, 8)
-        b.MouseEnter:Connect(function() ease(b, {TextColor3 = hoverColor}) end)
-        b.MouseLeave:Connect(function() ease(b, {TextColor3 = C.sub}) end)
-        b.MouseButton1Down:Connect(function() b.BackgroundColor3 = C.press end)
-        b.MouseButton1Up:Connect(function() b.BackgroundColor3 = C.surface end)
-        return b
-    end
-    headerBtn("–", -58, C.text).Activated:Connect(minimize)
-    closeBtn = headerBtn("×", -30, C.danger)
+    round(b, 8)
+    b.MouseEnter:Connect(function() b.TextColor3 = hoverColor end)
+    b.MouseLeave:Connect(function() b.TextColor3 = C.sub end)
+    return b
 end
+local minBtn = headerBtn("–", -62, C.text)
+local closeBtn = headerBtn("×", -34, C.danger)
+minBtn.Activated:Connect(minimize)
 
--- Tabs (indikator geser) + pages
+-- Pages
+local content = new("Frame", {
+    Size = UDim2.new(1, 0, 1, -60),
+    Position = UDim2.fromOffset(0, 38),
+    BackgroundTransparency = 1,
+}, window)
+
 local TABS = {"Main", "QTE", "Visual"}
 local pages, tabBtns = {}, {}
-local indicator
 local function selectTab(name)
     for n, pg in pairs(pages) do pg.Visible = (n == name) end
-    for i, n in ipairs(TABS) do
+    for n, b in pairs(tabBtns) do
         local on = (n == name)
-        tabBtns[n].TextColor3 = on and Color3.new(1, 1, 1) or C.sub
-        if on and indicator then
-            ease(indicator, {Position = UDim2.new((i - 1) / #TABS, 3, 0, 3)})
-        end
+        b.BackgroundTransparency = on and 0 or 1
+        b.TextColor3 = on and C.text or C.sub
     end
 end
-do
-    local tabBar = new("Frame", {
-        Size = UDim2.new(1, -20, 0, 28),
-        Position = UDim2.fromOffset(10, 40),
-        BackgroundColor3 = C.surface,
+for i, name in ipairs(TABS) do
+    local b = new("TextButton", {
+        Size = UDim2.new(1 / #TABS, -4, 1, -4),
+        Position = UDim2.new((i - 1) / #TABS, 2, 0, 2),
+        BackgroundColor3 = C.accent,
+        BackgroundTransparency = 1,
         BorderSizePixel = 0,
-    }, window)
-    round(tabBar, 9)
-    new("UIStroke", {Color = C.stroke, Thickness = 1}, tabBar)
-    indicator = new("Frame", {
-        Size = UDim2.new(1 / #TABS, -6, 1, -6),
-        Position = UDim2.new(0, 3, 0, 3),
-        BackgroundColor3 = Color3.new(1, 1, 1),
-        BorderSizePixel = 0,
+        AutoButtonColor = false,
+        Text = name,
+        TextColor3 = C.sub,
+        Font = FONT,
+        TextSize = 12,
     }, tabBar)
-    round(indicator, 7)
-    new("UIGradient", {Color = ColorSequence.new(C.accent, C.accent2), Rotation = 20}, indicator)
+    round(b, 6)
+    tabBtns[name] = b
+    b.Activated:Connect(function() selectTab(name) end)
 
-    local content = new("Frame", {
-        Size = UDim2.new(1, 0, 1, -102),
-        Position = UDim2.fromOffset(0, 76),
-        BackgroundTransparency = 1,
-    }, window)
-    for i, name in ipairs(TABS) do
-        local b = new("TextButton", {
-            Size = UDim2.new(1 / #TABS, 0, 1, 0),
-            Position = UDim2.new((i - 1) / #TABS, 0, 0, 0),
-            BackgroundTransparency = 1,
-            AutoButtonColor = false,
-            Text = name,
-            TextColor3 = C.sub,
-            Font = FONT_B,
-            TextSize = 12,
-            ZIndex = 2,
-        }, tabBar)
-        tabBtns[name] = b
-        b.Activated:Connect(function() selectTab(name) end)
-
-        local pg = new("Frame", {Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Visible = false}, content)
-        new("UIPadding", {PaddingLeft = UDim.new(0, 10), PaddingRight = UDim.new(0, 10), PaddingTop = UDim.new(0, 2)}, pg)
-        new("UIListLayout", {Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder}, pg)
-        pages[name] = pg
-    end
+    local pg = new("Frame", {Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Visible = false}, content)
+    new("UIPadding", {PaddingLeft = UDim.new(0, 10), PaddingRight = UDim.new(0, 10), PaddingTop = UDim.new(0, 2)}, pg)
+    new("UIListLayout", {Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder}, pg)
+    pages[name] = pg
 end
 
---// Komponen: card (toggle + slider opsional di dalamnya)
-local UI = {}
-
-function UI.card(parent, h)
-    local card = new("Frame", {
-        Size = UDim2.new(1, 0, 0, h),
+local function makeToggle(parent, text, init, onChange)
+    local on = init == true
+    local row = new("TextButton", {
+        Size = UDim2.new(1, 0, 0, 32),
         BackgroundColor3 = C.surface,
         BorderSizePixel = 0,
-    }, parent)
-    round(card, 10)
-    local stroke = new("UIStroke", {Color = C.stroke, Thickness = 1}, card)
-    local bar = new("Frame", {
-        Size = UDim2.new(0, 3, 0, 18),
-        Position = UDim2.fromOffset(0, 8),
-        BackgroundColor3 = C.off,
-        BorderSizePixel = 0,
-    }, card)
-    round(bar, 2)
-    return card, stroke, bar
-end
-
--- opts: hint (teks kecil), counter ("gate"/"stam" = jumlah tap otomatis), extra (tinggi tambahan buat slider)
--- return: card, tinggi baris (y awal slider)
-function UI.toggle(parent, text, init, onChange, opts)
-    opts = opts or {}
-    local on = init == true
-    local rowH = opts.hint and 40 or 34
-    local card, stroke, bar = UI.card(parent, rowH + (opts.extra or 0))
-    bar.Size = UDim2.new(0, 3, 0, rowH - 16)
-    local row = new("TextButton", {
-        Size = UDim2.new(1, 0, 0, rowH),
-        BackgroundTransparency = 1,
         AutoButtonColor = false,
         Text = "",
-    }, card)
-    local titleW = opts.counter and -120 or -64
+    }, parent)
+    round(row, 9)
     new("TextLabel", {
-        Size = UDim2.new(1, titleW, 0, opts.hint and 18 or rowH),
-        Position = UDim2.fromOffset(14, opts.hint and 5 or 0),
+        Size = UDim2.new(1, -60, 1, 0),
+        Position = UDim2.fromOffset(12, 0),
         BackgroundTransparency = 1,
         Text = text,
         TextColor3 = C.text,
@@ -1255,138 +1125,81 @@ function UI.toggle(parent, text, init, onChange, opts)
         TextSize = 13,
         TextXAlignment = Enum.TextXAlignment.Left,
     }, row)
-    if opts.hint then
-        new("TextLabel", {
-            Size = UDim2.new(1, titleW, 0, 12),
-            Position = UDim2.fromOffset(14, 22),
-            BackgroundTransparency = 1,
-            Text = opts.hint,
-            TextColor3 = C.sub,
-            Font = FONT,
-            TextSize = 10,
-            TextXAlignment = Enum.TextXAlignment.Left,
-        }, row)
-    end
-    if opts.counter then
-        qLabel[opts.counter] = new("TextLabel", {
-            Size = UDim2.fromOffset(54, 14),
-            Position = UDim2.new(1, -110, 0, (rowH - 14) / 2),
-            BackgroundTransparency = 1,
-            Text = qCount[opts.counter] .. " tap",
-            TextColor3 = C.sub,
-            Font = FONT,
-            TextSize = 10,
-            TextXAlignment = Enum.TextXAlignment.Right,
-        }, row)
-    end
     local track = new("Frame", {
-        Size = UDim2.fromOffset(36, 20),
-        Position = UDim2.new(1, -50, 0, (rowH - 20) / 2),
-        BackgroundColor3 = C.off,
+        Size = UDim2.fromOffset(32, 18),
+        Position = UDim2.new(1, -44, 0.5, -9),
+        BackgroundColor3 = on and C.accent or C.off,
         BorderSizePixel = 0,
     }, row)
-    round(track, 10)
+    round(track, 9)
     local knob = new("Frame", {
-        Size = UDim2.fromOffset(14, 14),
-        Position = UDim2.fromOffset(3, 3),
+        Size = UDim2.fromOffset(12, 12),
+        Position = on and UDim2.fromOffset(17, 3) or UDim2.fromOffset(3, 3),
         BackgroundColor3 = Color3.new(1, 1, 1),
         BorderSizePixel = 0,
     }, track)
-    round(knob, 7)
-
-    local function paint(animate)
-        local col = on and C.accent or C.off
-        local props = {
-            {track, {BackgroundColor3 = col}},
-            {knob, {Position = on and UDim2.fromOffset(19, 3) or UDim2.fromOffset(3, 3)}},
-            {bar, {BackgroundColor3 = col}},
-            {stroke, {Color = on and C.accent or C.stroke, Transparency = on and 0.55 or 0}},
-        }
-        for _, p in ipairs(props) do
-            if animate then ease(p[1], p[2]) else for k, v in pairs(p[2]) do p[1][k] = v end end
-        end
-    end
-    paint(false)
-
-    row.MouseButton1Down:Connect(function() card.BackgroundColor3 = C.press end)
-    row.MouseButton1Up:Connect(function() card.BackgroundColor3 = C.surface end)
-    row.MouseLeave:Connect(function() card.BackgroundColor3 = C.surface end)
+    round(knob, 6)
+    row.MouseButton1Down:Connect(function() row.BackgroundColor3 = C.press end)
+    row.MouseButton1Up:Connect(function() row.BackgroundColor3 = C.surface end)
+    row.MouseLeave:Connect(function() row.BackgroundColor3 = C.surface end)
     row.Activated:Connect(function()
         on = not on
-        paint(true)
+        ease(track, {BackgroundColor3 = on and C.accent or C.off})
+        ease(knob, {Position = on and UDim2.fromOffset(17, 3) or UDim2.fromOffset(3, 3)})
         onChange(on)
     end)
-    local function set(v)
-        v = v == true
-        if v == on then return end
-        on = v
-        paint(true)
-        onChange(on)
-    end
-    return card, rowH, set
 end
 
--- Slider di dalam card (tinggi 40) mulai dari y
-function UI.slider(card, y, label, MIN, MAX, STEP, init, fmt, onChange)
-    local box = new("Frame", {
-        Size = UDim2.new(1, 0, 0, 40),
-        Position = UDim2.fromOffset(0, y),
-        BackgroundTransparency = 1,
-    }, card)
-    new("Frame", {
-        Size = UDim2.new(1, -28, 0, 1),
-        Position = UDim2.fromOffset(14, 0),
-        BackgroundColor3 = C.stroke,
-        BackgroundTransparency = 0.35,
+local function makeSlider(parent, label, MIN, MAX, STEP, init, fmt, onChange)
+    local card = new("Frame", {
+        Size = UDim2.new(1, 0, 0, 50),
+        BackgroundColor3 = C.surface,
         BorderSizePixel = 0,
-    }, box)
+    }, parent)
+    round(card, 9)
     new("TextLabel", {
-        Size = UDim2.new(1, -86, 0, 16),
-        Position = UDim2.fromOffset(14, 5),
+        Size = UDim2.new(0.6, -12, 0, 18),
+        Position = UDim2.fromOffset(12, 6),
         BackgroundTransparency = 1,
         Text = label,
-        TextColor3 = C.sub,
+        TextColor3 = C.text,
         Font = FONT,
-        TextSize = 11,
+        TextSize = 13,
         TextXAlignment = Enum.TextXAlignment.Left,
-    }, box)
-    local chip = new("TextLabel", {
-        Size = UDim2.fromOffset(56, 16),
-        Position = UDim2.new(1, -70, 0, 5),
-        BackgroundColor3 = C.press,
-        BorderSizePixel = 0,
+    }, card)
+    local valueLabel = new("TextLabel", {
+        Size = UDim2.new(0.4, -12, 0, 18),
+        Position = UDim2.new(0.6, 0, 0, 6),
+        BackgroundTransparency = 1,
         Text = "",
         TextColor3 = C.accent,
         Font = FONT_B,
-        TextSize = 11,
-    }, box)
-    round(chip, 8)
+        TextSize = 13,
+        TextXAlignment = Enum.TextXAlignment.Right,
+    }, card)
     local hit = new("Frame", {
-        Size = UDim2.new(1, -28, 0, 16),
-        Position = UDim2.fromOffset(14, 22),
+        Size = UDim2.new(1, -24, 0, 22),
+        Position = UDim2.fromOffset(12, 24),
         BackgroundTransparency = 1,
         Active = true,
-    }, box)
+    }, card)
     local bar = new("Frame", {
-        Size = UDim2.new(1, 0, 0, 5),
-        Position = UDim2.new(0, 0, 0.5, -2),
+        Size = UDim2.new(1, 0, 0, 6),
+        Position = UDim2.new(0, 0, 0.5, -3),
         BackgroundColor3 = C.off,
         BorderSizePixel = 0,
     }, hit)
     round(bar, 3)
-    local fill = new("Frame", {Size = UDim2.fromScale(0, 1), BackgroundColor3 = Color3.new(1, 1, 1), BorderSizePixel = 0}, bar)
+    local fill = new("Frame", {Size = UDim2.fromScale(0, 1), BackgroundColor3 = C.accent, BorderSizePixel = 0}, bar)
     round(fill, 3)
-    new("UIGradient", {Color = ColorSequence.new(C.accent, C.accent2)}, fill)
     local knob = new("Frame", {
-        Size = UDim2.fromOffset(14, 14),
+        Size = UDim2.fromOffset(16, 16),
         AnchorPoint = Vector2.new(0.5, 0.5),
         Position = UDim2.fromScale(0, 0.5),
         BackgroundColor3 = Color3.new(1, 1, 1),
         BorderSizePixel = 0,
     }, bar)
-    round(knob, 7)
-    new("UIStroke", {Color = C.accent, Thickness = 2}, knob)
-    local knobScale = new("UIScale", {Scale = 1}, knob)
+    round(knob, 8)
 
     local cur
     local function setVal(m)
@@ -1398,7 +1211,7 @@ function UI.slider(card, y, label, MIN, MAX, STEP, init, fmt, onChange)
         local r = (m - MIN) / (MAX - MIN)
         fill.Size = UDim2.fromScale(r, 1)
         knob.Position = UDim2.fromScale(r, 0.5)
-        chip.Text = fmt(m)
+        valueLabel.Text = fmt(m)
         onChange(m)
     end
     local function fromInput(input)
@@ -1406,222 +1219,93 @@ function UI.slider(card, y, label, MIN, MAX, STEP, init, fmt, onChange)
         setVal(MIN + math.clamp(r, 0, 1) * (MAX - MIN))
     end
     setVal(init)
-    local function setExt(v) setVal(v) end
 
     hit.InputBegan:Connect(function(input)
         if not isPointer(input) then return end
         fromInput(input)
-        ease(knobScale, {Scale = 1.25})
         local cMove, cEnd
         cMove = UIS.InputChanged:Connect(function(i)
             if isMove(i) then fromInput(i) end
         end)
         cEnd = UIS.InputEnded:Connect(function(i)
-            if isPointer(i) then
-                cMove:Disconnect()
-                cEnd:Disconnect()
-                ease(knobScale, {Scale = 1})
-            end
+            if isPointer(i) then cMove:Disconnect(); cEnd:Disconnect() end
         end)
     end)
-    return setExt
 end
 
-local paintPresets -- didefinisikan di tab Main
 local function apply(key, on, setter)
     cfg[key] = on
     setActive(key, on)
     setter(on)
     save()
 end
-local applyingPreset = false
-local function manual() -- perubahan manual = bukan preset lagi
-    if applyingPreset or cfg.preset == "" then return end
-    cfg.preset = ""
-    save()
-    if paintPresets then paintPresets() end
-end
 
 -- Tab Main
-local setEasyUI, setSpeedUI, setMultUI, paintStam
-local stamBtns = {}
-local presetBtns = {}
+makeToggle(pages.Main, "Easy Control", cfg.easy, function(v) apply("easy", v, setEasy) end)
+makeToggle(pages.Main, "Infinite Stamina", cfg.stam, function(v) apply("stam", v, setStamina) end)
+makeToggle(pages.Main, "Speed Boost", cfg.speed, function(v) apply("speed", v, setSpeed) end)
+makeSlider(pages.Main, "Multiplier", 1.1, 1.5, 0.05, cfg.mult,
+    function(v) return string.format("%.2fx", v) end,
+    function(v)
+        speedMult = v
+        if v ~= cfg.mult then cfg.mult = v; save() end
+    end)
 
-local function applyStam(m)
-    cfg.sm = m
-    setActive("stam", m > 0)
-    setStamina(m)
-    save()
-    if paintStam then paintStam() end
-end
-
--- Baris preset (Safe / Medium / Semi / Aggro)
-do
-    local row = new("Frame", {Size = UDim2.new(1, 0, 0, 30), BackgroundTransparency = 1, LayoutOrder = 0}, pages.Main)
-    local n = #PRESETS
-    for i, p in ipairs(PRESETS) do
-        local b = new("TextButton", {
-            Size = UDim2.new(1 / n, -4, 1, 0),
-            Position = UDim2.new((i - 1) / n, 2, 0, 0),
-            BackgroundColor3 = C.surface,
-            BorderSizePixel = 0,
-            AutoButtonColor = false,
-            Text = p.name,
-            TextColor3 = C.sub,
-            Font = FONT_B,
-            TextSize = 11,
-        }, row)
-        round(b, 8)
-        local st = new("UIStroke", {Color = C.stroke, Thickness = 1}, b)
-        presetBtns[p.name] = {b, st, p}
-        b.Activated:Connect(function()
-            applyingPreset = true
-            cfg.preset = p.name
-            if setEasyUI then setEasyUI(p.easy) end
-            applyStam(p.sm)
-            if setMultUI then setMultUI(p.mult) end
-            if setSpeedUI then setSpeedUI(true) end
-            applyingPreset = false
-            save()
-            paintPresets()
-            pop(winScale)
-        end)
-    end
-    function paintPresets()
-        for name, e in pairs(presetBtns) do
-            local on = (cfg.preset == name)
-            ease(e[1], {TextColor3 = on and Color3.new(1, 1, 1) or C.sub, BackgroundColor3 = on and C.press or C.surface})
-            ease(e[2], {Color = on and e[3].col or C.stroke})
-        end
-    end
-    paintPresets()
-end
-
-do
-    local _, _, set = UI.toggle(pages.Main, "Easy Control", cfg.easy, function(v) apply("easy", v, setEasy); manual() end)
-    setEasyUI = set
-end
-
--- Stamina: Off / Semi / Infinite
-do
-    local card, stroke, bar = UI.card(pages.Main, 56)
-    new("TextLabel", {
-        Size = UDim2.new(1, -28, 0, 18), Position = UDim2.fromOffset(14, 4), BackgroundTransparency = 1,
-        Text = "Stamina", TextColor3 = C.text, Font = FONT, TextSize = 13, TextXAlignment = Enum.TextXAlignment.Left,
-    }, card)
-    local modes = {{"Off", 0}, {"Semi", 1}, {"Infinite", 2}}
-    for i, m in ipairs(modes) do
-        local b = new("TextButton", {
-            Size = UDim2.new(1 / 3, -8, 0, 22),
-            Position = UDim2.new((i - 1) / 3, 6 + (i - 1) * 0, 0, 28),
-            BackgroundColor3 = C.off,
-            BorderSizePixel = 0,
-            AutoButtonColor = false,
-            Text = m[1],
-            TextColor3 = C.sub,
-            Font = FONT_B,
-            TextSize = 11,
-        }, card)
-        round(b, 7)
-        stamBtns[m[2]] = b
-        b.Activated:Connect(function()
-            if cfg.sm == m[2] then return end
-            applyStam(m[2])
-            manual()
-        end)
-    end
-    function paintStam()
-        for k, b in pairs(stamBtns) do
-            local on = cfg.sm == k
-            local col = (k == 2) and C.danger or C.accent
-            ease(b, {BackgroundColor3 = on and (k == 0 and C.press or col) or C.off, TextColor3 = on and Color3.new(1, 1, 1) or C.sub})
-        end
-        ease(bar, {BackgroundColor3 = cfg.sm == 0 and C.off or (cfg.sm == 2 and C.danger or C.accent)})
-        ease(stroke, {Color = cfg.sm == 0 and C.stroke or (cfg.sm == 2 and C.danger or C.accent), Transparency = cfg.sm == 0 and 0 or 0.55})
-    end
-    bar.Size = UDim2.new(0, 3, 0, 40)
-    paintStam()
-end
-
-do
-    local card, y, set = UI.toggle(pages.Main, "Speed Boost", cfg.speed, function(v) apply("speed", v, setSpeed); manual() end, {extra = 40})
-    setSpeedUI = set
-    setMultUI = UI.slider(card, y, "Multiplier", 1.1, 1.5, 0.05, cfg.mult,
-        function(v) return string.format("%.2fx", v) end,
-        function(v)
-            speedMult = v
-            if v ~= cfg.mult then cfg.mult = v; save(); manual() end
-        end)
-end
-
--- Tab QTE (dua modul terpisah, timing otomatis)
-do
-    UI.toggle(pages.QTE, "Auto Gate QTE", cfg.qGate, function(v) apply("qGate", v, setGate) end,
-        {hint = "Tap tengah lingkaran gate", counter = "gate"})
-    UI.toggle(pages.QTE, "Auto Stamina QTE", cfg.qStam, function(v) apply("qStam", v, setStam) end,
-        {hint = "Tap pas pointer kena bintang", counter = "stam"})
-end
+-- Tab QTE (dua modul terpisah)
+makeToggle(pages.QTE, "Auto Gate QTE", cfg.qGate, function(v) apply("qGate", v, setGate) end)
+makeSlider(pages.QTE, "Gate Time", 400, 800, 10, cfg.gateT,
+    function(v) return string.format("%dms", v) end,
+    function(v) if v ~= cfg.gateT then cfg.gateT = v; save() end end)
+makeToggle(pages.QTE, "Auto Stamina QTE", cfg.qStam, function(v) apply("qStam", v, setStam) end)
+makeSlider(pages.QTE, "Timing (- awal / + telat)", -100, 100, 5, cfg.qDelay,
+    function(v) return string.format("%+dms", v) end,
+    function(v) if v ~= cfg.qDelay then cfg.qDelay = v; save() end end)
 
 -- Tab Visual
-do
-    local card, y = UI.toggle(pages.Visual, "Soft Light & Color", cfg.light, function(v) apply("light", v, setLight) end, {extra = 40})
-    UI.slider(card, y, "Tone (tinggi = lebih datar)", 0.2, 1, 0.05, cfg.tone,
-        function(v) return string.format("%d%%", math.floor(v * 100 + 0.5)) end,
-        function(v)
-            cfg.tone = v
-            save()
-            if G.light then lightAcc = 2; lightN = 0 end -- diterapkan di tick berikutnya (hemat)
-        end)
-end
-UI.toggle(pages.Visual, "Flat Textures", cfg.tex, function(v) apply("tex", v, setTex) end)
-UI.toggle(pages.Visual, "Hide Effects", cfg.fx, function(v) apply("fx", v, setFx) end)
+makeToggle(pages.Visual, "Soft Light & Color", cfg.light, function(v) apply("light", v, setLight) end)
+makeSlider(pages.Visual, "Tone (makin tinggi makin datar)", 0.2, 1, 0.05, cfg.tone,
+    function(v) return string.format("%d%%", math.floor(v * 100 + 0.5)) end,
+    function(v)
+        cfg.tone = v
+        save()
+        if G.light then lightAcc = 2; lightN = 0 end -- diterapkan di tick berikutnya (hemat)
+    end)
+makeToggle(pages.Visual, "Flat Textures", cfg.tex, function(v) apply("tex", v, setTex) end)
+makeToggle(pages.Visual, "Hide Effects", cfg.fx, function(v) apply("fx", v, setFx) end)
 
--- Status: hijau = nempel di game, kuning = aktif tapi belum ketemu (lobby / race belum mulai), merah = bocor, abu = off
-local dotStam, dotQte, dotVis
-do
-    local footer = new("Frame", {
-        Size = UDim2.new(1, -20, 0, 18),
-        Position = UDim2.new(0, 10, 1, -24),
-        BackgroundTransparency = 1,
-    }, window)
-    new("Frame", {
-        Size = UDim2.new(1, 0, 0, 1),
-        Position = UDim2.fromOffset(0, -4),
-        BackgroundColor3 = C.stroke,
-        BackgroundTransparency = 0.5,
+-- Status: hijau = nempel di game, kuning = aktif tapi belum ketemu (lobby / race belum mulai), abu = off
+local footer = new("Frame", {
+    Size = UDim2.new(1, -20, 0, 18),
+    Position = UDim2.new(0, 10, 1, -22),
+    BackgroundTransparency = 1,
+}, window)
+local function statusItem(text, x)
+    local d = new("Frame", {
+        Size = UDim2.fromOffset(7, 7),
+        Position = UDim2.new(0, x, 0.5, -3),
+        BackgroundColor3 = C.off,
         BorderSizePixel = 0,
     }, footer)
-    local function statusItem(text, x)
-        local d = new("Frame", {
-            Size = UDim2.fromOffset(7, 7),
-            Position = UDim2.new(0, x, 0.5, -3),
-            BackgroundColor3 = C.off,
-            BorderSizePixel = 0,
-        }, footer)
-        round(d, 4)
-        new("TextLabel", {
-            Size = UDim2.fromOffset(60, 16),
-            Position = UDim2.new(0, x + 12, 0.5, -8),
-            BackgroundTransparency = 1,
-            Text = text,
-            TextColor3 = C.sub,
-            Font = FONT,
-            TextSize = 11,
-            TextXAlignment = Enum.TextXAlignment.Left,
-        }, footer)
-        return d
-    end
-    dotStam = statusItem("Stamina", 2)
-    dotQte = statusItem("QTE", 82)
-    dotVis = statusItem("Visual", 140)
+    round(d, 4)
+    new("TextLabel", {
+        Size = UDim2.fromOffset(80, 16),
+        Position = UDim2.new(0, x + 12, 0.5, -8),
+        BackgroundTransparency = 1,
+        Text = text,
+        TextColor3 = C.sub,
+        Font = FONT,
+        TextSize = 11,
+        TextXAlignment = Enum.TextXAlignment.Left,
+    }, footer)
+    return d
 end
+local dotStam = statusItem("Stamina", 2)
+local dotVis = statusItem("Visual", 90)
 local function refreshStatus()
-    dotStam.BackgroundColor3 = (cfg.sm == 0) and C.off
-        or (cfg.sm == 1 and C.ok)
+    dotStam.BackgroundColor3 = (not cfg.stam) and C.off
         or ((#cfgs == 0) and C.warn)
         or ((os.clock() - leakAt < 3) and C.danger)
         or C.ok
-    dotQte.BackgroundColor3 = (cfg.qGate or cfg.qStam) and C.ok or C.off
     dotVis.BackgroundColor3 = (cfg.light or cfg.tex or cfg.fx) and C.ok or C.off
 end
 task.spawn(function()
@@ -1633,7 +1317,7 @@ end)
 
 --// Cleanup (close / re-execute): semua dikembalikan ke aslinya
 local function cleanup()
-    setStamina(0)
+    setStamina(false)
     setEasy(false)
     setSpeed(false)
     setGate(false)
@@ -1649,7 +1333,7 @@ closeBtn.Activated:Connect(cleanup)
 
 -- Terapkan setting tersimpan
 if cfg.easy then setActive("easy", true); setEasy(true) end
-if cfg.sm > 0 then setActive("stam", true); setStamina(cfg.sm) end
+if cfg.stam then setActive("stam", true); setStamina(true) end
 if cfg.speed then setActive("speed", true); setSpeed(true) end
 if cfg.qGate then setActive("qGate", true); setGate(true) end
 if cfg.qStam then setActive("qStam", true); setStam(true) end
