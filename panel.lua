@@ -1,4 +1,4 @@
---// Panel v21 — Presets · Easy Control · Stamina (Off/Semi/Inf) · Speed Boost · Auto QTE · Visual
+--// Panel v22 — Presets · Easy Control · Stamina (Off/Semi/Inf) · Speed Boost · Auto QTE · Visual
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UIS = game:GetService("UserInputService")
@@ -31,9 +31,9 @@ local C = {
     warn    = Color3.fromRGB(250, 190, 70),
 }
 local FONT, FONT_B = Enum.Font.GothamMedium, Enum.Font.GothamBold
-local WIN_W = 264
+local WIN_W = 236
 local _vp = (workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize) or Vector2.new(800, 400)
-local WIN_H = math.clamp(math.floor(_vp.Y) - 28, 250, 344)
+local WIN_H = math.clamp(math.floor(_vp.Y) - 40, 200, 262)
 
 --// Settings (disimpan otomatis)
 local FILE = "panel_settings.json"
@@ -216,6 +216,7 @@ local onStamEvent = safe(function(v)
         scan()
     end
 end)
+local semiSt, setSemi -- (diisi di bawah)
 local stAcc, infoSt, infoMx = 0, nil, nil
 local setStamLoop = hook(RunService.Heartbeat, function(dt)
     stAcc += dt
@@ -265,50 +266,52 @@ local setStamLoop = hook(RunService.Heartbeat, function(dt)
             drainT, drainGap = 0, 2
         end
     end
+    if mode == "semi" then
+        local info = player:FindFirstChild("Info")
+        local st = info and info:FindFirstChild("Stamina")
+        if st and st ~= semiSt then setSemi(true) end -- instance Info.Stamina diganti (race baru)
+    end
     if os.clock() - scanAt > (mode == "semi" and 15 or 30) then scan() end
 end)
--- Semi: stamina "virtual". Server ngirim nilai ABSOLUT lewat UpdateClientStamina (~10x/dtk), jadi refund relatif ke
--- nilai Info.Stamina yang kita tulis sendiri gak bakal nahan (ketimpa nilai server tiap update).
--- Di sini selisih antar nilai server (bukan nilai yang kita tulis) diskalakan: turun x SEMI_USE, naik kecil x SEMI_REGEN,
--- lalu hasilnya ditulis ke Info.Stamina tiap frame (di atas nilai server, gak pernah ngunci penuh).
-local semiV, semiRaw, semiConn
-local function semiRemote(v)
-    if type(v) ~= "number" then return end
-    local info = player:FindFirstChild("Info")
-    local mx = info and info:FindFirstChild("MaxStamina")
-    local m = mx and mx.Value or 150
-    if semiV == nil or semiRaw == nil then semiV, semiRaw = v, v; return end
-    local d = v - semiRaw
-    semiRaw = v
-    if d < 0 then
-        semiV += d * SEMI_USE
-    elseif d > 0 then
-        semiV += d * ((d <= 6) and SEMI_REGEN or 1) -- isi kecil = regen biasa (dipercepat); loncatan besar = bonus/zone, apa adanya
-    end
-    semiV = math.clamp(math.max(semiV, v), 0, m)
-    if env.PanelDebug then dbg("semi raw", v, "virtual", math.floor(semiV + 0.5)) end
-end
-local semiRemoteSafe = safe(semiRemote)
-local semiStep = safe(function()
-    if semiV == nil then return end
-    local info = player:FindFirstChild("Info")
-    local st = info and info:FindFirstChild("Stamina")
-    if not st then return end
-    local nv = math.floor(semiV + 0.5)
-    if st.Value ~= nv then st.Value = nv end
-end)
-local function setSemi(on)
-    pcall(function() RunService:UnbindFromRenderStep("PanelSemi") end)
+-- Semi: stamina "virtual". Server nulis nilai ABSOLUT ke Info.Stamina (~10x/dtk). Tiap nilai server masuk, langsung
+-- (sinkron lewat Changed, sebelum HUD sempat baca -> gak kedip naik-turun) dihitung ulang dari SELISIH antar nilai server:
+-- turun x SEMI_USE, naik kecil x SEMI_REGEN, loncatan besar (bonus/zone) apa adanya. Gak pernah ngunci penuh.
+local semiV, semiRaw, semiConn, semiWriting
+local semiTok = 0
+setSemi = function(on)
+    semiTok += 1
+    local tok = semiTok
     if semiConn then semiConn:Disconnect(); semiConn = nil end
-    semiV, semiRaw = nil, nil
+    semiV, semiRaw, semiSt = nil, nil, nil
     if not on then return end
-    local rem = game:GetService("ReplicatedStorage"):FindFirstChild("remotes")
-    local ev = rem and rem:FindFirstChild("UpdateClientStamina")
-    if ev and ev:IsA("RemoteEvent") then semiConn = ev.OnClientEvent:Connect(semiRemoteSafe) end
-    local info = player:FindFirstChild("Info")
-    local st = info and info:FindFirstChild("Stamina")
-    if st then semiV, semiRaw = st.Value, st.Value end
-    RunService:BindToRenderStep("PanelSemi", Enum.RenderPriority.Last.Value, semiStep)
+    task.spawn(function()
+        local info = player:WaitForChild("Info", 15)
+        local st = info and info:WaitForChild("Stamina", 15)
+        local mx = info and info:WaitForChild("MaxStamina", 15)
+        if tok ~= semiTok or not (st and mx) then return end
+        semiSt = st
+        semiV, semiRaw = st.Value, st.Value
+        semiConn = st:GetPropertyChangedSignal("Value"):Connect(function()
+            if semiWriting then return end
+            local raw, m = st.Value, mx.Value
+            local d = raw - semiRaw
+            semiRaw = raw
+            if d < 0 then
+                semiV += d * SEMI_USE
+            elseif d > 0 then
+                semiV += d * ((d <= 6) and SEMI_REGEN or 1)
+            end
+            semiV = math.clamp(math.max(semiV, raw), 0, m)
+            local nv = math.floor(semiV + 0.5)
+            if nv ~= raw then
+                semiWriting = true
+                st.Value = nv
+                semiWriting = false
+                semiRaw = raw -- yang dibandingkan berikutnya tetap nilai mentah dari server
+            end
+            if env.PanelDebug then dbg("semi raw", raw, "virtual", nv) end
+        end)
+    end)
 end
 local function setStamMode(mode)
     if mode ~= "semi" and mode ~= "inf" then mode = "off" end
@@ -376,22 +379,17 @@ local easyStep = safe(function(dt)
         ref = ref.Unit
     end
 
-    -- kamera di depan karakter (cinematic / look back) -> jangan diikutin
-    local fromChar = Vector3.new(cam.CFrame.Position.X - root.Position.X, 0, cam.CFrame.Position.Z - root.Position.Z)
-    if fromChar.Magnitude > 0.5 and fromChar.Unit:Dot(ref) > 0.2 then
-        easyHold = now + EASY_SETTLE
-        easyRelease(hum)
-        return
-    end
-    -- arah kamera nyimpang jauh dari arah hadap/lari
-    if flat:Dot(ref) < 0.35 then
+    -- Gerbang arah: diam = harus kira-kira searah (cegah ikut kamera cinematic / look back);
+    -- lagi lari = boleh belok tajam (sampai ~115 derajat) biar gak susah belok pas ngebut.
+    if flat:Dot(ref) < (moving and -0.4 or 0.35) then
         easyRelease(hum)
         return
     end
 
     hum.AutoRotate = false
     local want = CFrame.lookAt(root.Position, root.Position + flat)
-    local alpha = 1 - math.exp(-math.clamp(dt or 1 / 60, 0, 0.1) * 16)
+    local rate = 18 + math.min(h.Magnitude, 200) * 0.14 -- makin ngebut makin cepat ngikut kamera
+    local alpha = 1 - math.exp(-math.clamp(dt or 1 / 60, 0, 0.1) * rate)
     local cf = root.CFrame:Lerp(want, alpha)
     root.CFrame = cf
     if moving then
@@ -643,9 +641,10 @@ local function dumpQte(frame)
 end
 
 -- RenderStep (priority Last) hidup cuma selama satu QTE.
--- signed = jarak sudut pointer ke Star (+ = Star di depan, - = baru lewat). Tap kalau -passed <= signed <= half.
--- "passed" nangkep kasus frame ke-skip (FPS rendah): dulu kelewat = nunggu 1 putaran penuh = baru kena pas QTE selesai.
--- SNAP: pointer digeser tepat ke Star sesaat sebelum tap, jadi hasilnya gak bergantung ke FPS.
+--  * Kecepatan pointer = perubahan sudut / waktu nyata di jendela 0.3 dtk (stabil walau FPS naik-turun).
+--  * tt = waktu sampai pointer kena Star dikurangi STAM_LEAD. Kalau tt <= 1 frame, sisa waktunya DITUNGGU
+--    di dalam frame itu (busy-wait <= 1 frame) lalu tap -> presisi gak kena pembulatan per-frame / FPS rendah.
+--  * Kalau Star baru lewat (frame ke-skip) tetap tap saat itu juga, bukan nunggu 1 putaran penuh.
 local stamId = 0
 local function runStamina(frame)
     stamId += 1
@@ -653,8 +652,8 @@ local function runStamina(frame)
     local t0 = os.clock()
     local tf, tm, star
     local parentRot = 0
-    local lastR, dir, spd = nil, nil, 0
-    local samples, stable, lastTarget = 0, 0, nil
+    local lastR, unwrapped, hist = nil, 0, {}
+    local stable, lastTarget = 0, nil
     local bound = true
     local function stop()
         if bound then
@@ -681,16 +680,21 @@ local function runStamina(frame)
         if not (tm and tm.Parent) then return stop() end
 
         local pr = tm.Rotation + parentRot
-        if not lastR then lastR = pr; return end
-        local dR = (pr - lastR + 540) % 360 - 180
-        lastR = pr
-        if dR ~= 0 then
-            dir = dR > 0 and 1 or -1
-            samples += 1
-            local inst = math.abs(dR) / dt
-            spd = spd == 0 and inst or (spd * 0.5 + inst * 0.5)
+        if not lastR then
+            lastR = pr
+            hist[1] = {now, 0}
+            return
         end
-        if samples < 2 or not dir or spd < 20 then return end
+        unwrapped += (pr - lastR + 540) % 360 - 180
+        lastR = pr
+        hist[#hist + 1] = {now, unwrapped}
+        while #hist > 3 and now - hist[1][1] > 0.3 do table.remove(hist, 1) end
+        local n = #hist
+        local span = hist[n][1] - hist[1][1]
+        if n < 3 or span < 0.05 then return end
+        local sp = (hist[n][2] - hist[1][2]) / span -- derajat/dtk, bertanda
+        if math.abs(sp) < 20 then return end
+        local dir, spd = sp > 0 and 1 or -1, math.abs(sp)
 
         local v = centerOf(star) - centerOf(tf)
         if v.Magnitude < 1 then return end
@@ -703,12 +707,15 @@ local function runStamina(frame)
         lastTarget = target
         if stable < 1 then return end
 
-        local signed = (((target - pr) * dir) + 180) % 360 - 180
-        local half = spd * (dt * 0.5 + STAM_LEAD)
-        local passed = math.max(spd * dt * 1.5, 12)
-        if signed <= half and signed >= -passed then
+        local signed = (((target - pr) * dir) + 180) % 360 - 180 -- + = Star di depan pointer, - = baru lewat
+        local tt = signed / spd - STAM_LEAD
+        if signed >= -math.max(spd * dt * 1.5, 12) and tt <= dt then
             stop()
-            dbg("stam fire", string.format("signed=%.1f spd=%.0f dt=%.3f dir=%d target=%.0f", signed, spd, dt, dir, target))
+            if tt > 0.0005 and tt < 0.12 then
+                local t1 = os.clock() + tt
+                while os.clock() < t1 do end
+            end
+            dbg("stam fire", string.format("signed=%.1f spd=%.0f dt=%.3f tt=%.4f dir=%d", signed, spd, dt, tt, dir))
             if SNAP then pcall(function() tm.Rotation = target - parentRot end) end
             press(frame, "stam")
         end
@@ -1076,7 +1083,7 @@ local window = new("Frame", {
     BackgroundTransparency = 0.02,
     BorderSizePixel = 0,
 }, gui)
-round(window, 14)
+round(window, 12)
 new("UIStroke", {Color = C.stroke, Thickness = 1}, window)
 local winScale = new("UIScale", {Scale = 1}, window)
 new("UIGradient", {
@@ -1085,11 +1092,8 @@ new("UIGradient", {
 }, window)
 do
     local x, y
-    if cfg.wx >= 0 and cfg.wy >= 0 then
-        x, y = clampXY(cfg.wx, cfg.wy, WIN_W, WIN_H)
-    else
-        x, y = math.floor((viewport().X - WIN_W) / 2), math.max(8, math.floor((viewport().Y - WIN_H) / 2))
-    end
+    -- selalu muncul di tengah atas tiap execute (posisi lama gak dipakai)
+    x, y = clampXY(math.floor((viewport().X - WIN_W) / 2), 8, WIN_W, WIN_H)
     window.Position = UDim2.fromOffset(x, y)
 end
 
@@ -1178,21 +1182,18 @@ end
 
 -- Header: logo + judul + minimize + close
 local header = new("Frame", {
-    Size = UDim2.new(1, 0, 0, 36),
+    Size = UDim2.new(1, 0, 0, 30),
     BackgroundTransparency = 1,
     Active = true,
 }, window)
-draggable(header, window, nil, function()
-    cfg.wx, cfg.wy = window.Position.X.Offset, window.Position.Y.Offset
-    save()
-end)
+draggable(header, window)
 draggable(bubble, bubble, restore)
 
 local closeBtn
 do
     local logo = new("Frame", {
-        Size = UDim2.fromOffset(20, 20),
-        Position = UDim2.fromOffset(12, 8),
+        Size = UDim2.fromOffset(18, 18),
+        Position = UDim2.fromOffset(10, 6),
         BackgroundColor3 = Color3.new(1, 1, 1),
         BorderSizePixel = 0,
     }, header)
@@ -1203,20 +1204,20 @@ do
         TextColor3 = Color3.new(1, 1, 1), Font = FONT_B, TextSize = 13,
     }, logo)
     new("TextLabel", {
-        Size = UDim2.fromOffset(50, 36), Position = UDim2.fromOffset(38, 0), BackgroundTransparency = 1,
-        Text = "Panel", TextColor3 = C.text, Font = FONT_B, TextSize = 14, TextXAlignment = Enum.TextXAlignment.Left,
+        Size = UDim2.fromOffset(40, 30), Position = UDim2.fromOffset(34, 0), BackgroundTransparency = 1,
+        Text = "Panel", TextColor3 = C.text, Font = FONT_B, TextSize = 13, TextXAlignment = Enum.TextXAlignment.Left,
     }, header)
     local ver = new("TextLabel", {
-        Size = UDim2.fromOffset(30, 16), Position = UDim2.fromOffset(86, 10),
+        Size = UDim2.fromOffset(28, 14), Position = UDim2.fromOffset(74, 8),
         BackgroundColor3 = C.surface, BorderSizePixel = 0,
-        Text = "v21", TextColor3 = C.sub, Font = FONT, TextSize = 10,
+        Text = "v22", TextColor3 = C.sub, Font = FONT, TextSize = 10,
     }, header)
     round(ver, 8)
 
     local function headerBtn(text, x, hoverColor)
         local b = new("TextButton", {
-            Size = UDim2.fromOffset(24, 24),
-            Position = UDim2.new(1, x, 0, 6),
+            Size = UDim2.fromOffset(22, 22),
+            Position = UDim2.new(1, x, 0, 4),
             BackgroundColor3 = C.surface,
             BorderSizePixel = 0,
             AutoButtonColor = false,
@@ -1232,8 +1233,8 @@ do
         b.MouseButton1Up:Connect(function() b.BackgroundColor3 = C.surface end)
         return b
     end
-    headerBtn("–", -58, C.text).Activated:Connect(minimize)
-    closeBtn = headerBtn("×", -30, C.danger)
+    headerBtn("–", -52, C.text).Activated:Connect(minimize)
+    closeBtn = headerBtn("×", -27, C.danger)
 end
 
 -- Tabs (indikator geser) + pages
@@ -1246,31 +1247,31 @@ local function selectTab(name)
         local on = (n == name)
         tabBtns[n].TextColor3 = on and Color3.new(1, 1, 1) or C.sub
         if on and indicator then
-            ease(indicator, {Position = UDim2.new((i - 1) / #TABS, 3, 0, 3)})
+            ease(indicator, {Position = UDim2.new((i - 1) / #TABS, 2, 0, 2)})
         end
     end
 end
 do
     local tabBar = new("Frame", {
-        Size = UDim2.new(1, -20, 0, 28),
-        Position = UDim2.fromOffset(10, 40),
+        Size = UDim2.new(1, -16, 0, 24),
+        Position = UDim2.fromOffset(8, 33),
         BackgroundColor3 = C.surface,
         BorderSizePixel = 0,
     }, window)
-    round(tabBar, 9)
+    round(tabBar, 8)
     new("UIStroke", {Color = C.stroke, Thickness = 1}, tabBar)
     indicator = new("Frame", {
-        Size = UDim2.new(1 / #TABS, -6, 1, -6),
-        Position = UDim2.new(0, 3, 0, 3),
+        Size = UDim2.new(1 / #TABS, -4, 1, -4),
+        Position = UDim2.new(0, 2, 0, 2),
         BackgroundColor3 = Color3.new(1, 1, 1),
         BorderSizePixel = 0,
     }, tabBar)
-    round(indicator, 7)
+    round(indicator, 6)
     new("UIGradient", {Color = ColorSequence.new(C.accent, C.accent2), Rotation = 20}, indicator)
 
     local content = new("Frame", {
-        Size = UDim2.new(1, 0, 1, -102),
-        Position = UDim2.fromOffset(0, 76),
+        Size = UDim2.new(1, 0, 1, -86),
+        Position = UDim2.fromOffset(0, 62),
         BackgroundTransparency = 1,
     }, window)
     for i, name in ipairs(TABS) do
@@ -1282,7 +1283,7 @@ do
             Text = name,
             TextColor3 = C.sub,
             Font = FONT_B,
-            TextSize = 12,
+            TextSize = 11,
             ZIndex = 2,
         }, tabBar)
         tabBtns[name] = b
@@ -1293,8 +1294,8 @@ do
             ScrollBarThickness = 2, ScrollBarImageColor3 = C.stroke, CanvasSize = UDim2.new(),
             AutomaticCanvasSize = Enum.AutomaticSize.Y, ScrollingDirection = Enum.ScrollingDirection.Y,
         }, content)
-        new("UIPadding", {PaddingLeft = UDim.new(0, 10), PaddingRight = UDim.new(0, 10), PaddingTop = UDim.new(0, 2), PaddingBottom = UDim.new(0, 6)}, pg)
-        new("UIListLayout", {Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder}, pg)
+        new("UIPadding", {PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8), PaddingTop = UDim.new(0, 2), PaddingBottom = UDim.new(0, 4)}, pg)
+        new("UIListLayout", {Padding = UDim.new(0, 5), SortOrder = Enum.SortOrder.LayoutOrder}, pg)
         pages[name] = pg
     end
 end
@@ -1309,11 +1310,11 @@ function UI.card(parent, h)
         BackgroundColor3 = C.surface,
         BorderSizePixel = 0,
     }, parent)
-    round(card, 10)
+    round(card, 8)
     local stroke = new("UIStroke", {Color = C.stroke, Thickness = 1}, card)
     local bar = new("Frame", {
-        Size = UDim2.new(0, 3, 0, 18),
-        Position = UDim2.fromOffset(0, 8),
+        Size = UDim2.new(0, 3, 0, 14),
+        Position = UDim2.fromOffset(0, 7),
         BackgroundColor3 = C.off,
         BorderSizePixel = 0,
     }, card)
@@ -1326,30 +1327,30 @@ end
 function UI.toggle(parent, text, init, onChange, opts)
     opts = opts or {}
     local on = init == true
-    local rowH = opts.hint and 40 or 34
+    local rowH = opts.hint and 36 or 30
     local card, stroke, bar = UI.card(parent, rowH + (opts.extra or 0))
-    bar.Size = UDim2.new(0, 3, 0, rowH - 16)
+    bar.Size = UDim2.new(0, 3, 0, rowH - 14)
     local row = new("TextButton", {
         Size = UDim2.new(1, 0, 0, rowH),
         BackgroundTransparency = 1,
         AutoButtonColor = false,
         Text = "",
     }, card)
-    local titleW = opts.counter and -120 or -64
+    local titleW = opts.counter and -104 or -56
     new("TextLabel", {
-        Size = UDim2.new(1, titleW, 0, opts.hint and 18 or rowH),
-        Position = UDim2.fromOffset(14, opts.hint and 5 or 0),
+        Size = UDim2.new(1, titleW, 0, opts.hint and 16 or rowH),
+        Position = UDim2.fromOffset(12, opts.hint and 4 or 0),
         BackgroundTransparency = 1,
         Text = text,
         TextColor3 = C.text,
         Font = FONT,
-        TextSize = 13,
+        TextSize = 12,
         TextXAlignment = Enum.TextXAlignment.Left,
     }, row)
     if opts.hint then
         new("TextLabel", {
             Size = UDim2.new(1, titleW, 0, 12),
-            Position = UDim2.fromOffset(14, 22),
+            Position = UDim2.fromOffset(12, 20),
             BackgroundTransparency = 1,
             Text = opts.hint,
             TextColor3 = C.sub,
@@ -1361,7 +1362,7 @@ function UI.toggle(parent, text, init, onChange, opts)
     if opts.counter then
         qLabel[opts.counter] = new("TextLabel", {
             Size = UDim2.fromOffset(54, 14),
-            Position = UDim2.new(1, -110, 0, (rowH - 14) / 2),
+            Position = UDim2.new(1, -98, 0, (rowH - 14) / 2),
             BackgroundTransparency = 1,
             Text = qCount[opts.counter] .. " tap",
             TextColor3 = C.sub,
@@ -1371,25 +1372,25 @@ function UI.toggle(parent, text, init, onChange, opts)
         }, row)
     end
     local track = new("Frame", {
-        Size = UDim2.fromOffset(36, 20),
-        Position = UDim2.new(1, -50, 0, (rowH - 20) / 2),
+        Size = UDim2.fromOffset(32, 18),
+        Position = UDim2.new(1, -42, 0, (rowH - 18) / 2),
         BackgroundColor3 = C.off,
         BorderSizePixel = 0,
     }, row)
-    round(track, 10)
+    round(track, 9)
     local knob = new("Frame", {
-        Size = UDim2.fromOffset(14, 14),
+        Size = UDim2.fromOffset(12, 12),
         Position = UDim2.fromOffset(3, 3),
         BackgroundColor3 = Color3.new(1, 1, 1),
         BorderSizePixel = 0,
     }, track)
-    round(knob, 7)
+    round(knob, 6)
 
     local function paint(animate)
         local col = on and C.accent or C.off
         local props = {
             {track, {BackgroundColor3 = col}},
-            {knob, {Position = on and UDim2.fromOffset(19, 3) or UDim2.fromOffset(3, 3)}},
+            {knob, {Position = on and UDim2.fromOffset(17, 3) or UDim2.fromOffset(3, 3)}},
             {bar, {BackgroundColor3 = col}},
             {stroke, {Color = on and C.accent or C.stroke, Transparency = on and 0.55 or 0}},
         }
@@ -1420,41 +1421,41 @@ end
 -- Slider di dalam card (tinggi 40) mulai dari y. return api {set(v)} (onChange tetap dipanggil)
 function UI.slider(card, y, label, MIN, MAX, STEP, init, fmt, onChange)
     local box = new("Frame", {
-        Size = UDim2.new(1, 0, 0, 40),
+        Size = UDim2.new(1, 0, 0, 34),
         Position = UDim2.fromOffset(0, y),
         BackgroundTransparency = 1,
     }, card)
     new("Frame", {
-        Size = UDim2.new(1, -28, 0, 1),
-        Position = UDim2.fromOffset(14, 0),
+        Size = UDim2.new(1, -24, 0, 1),
+        Position = UDim2.fromOffset(12, 0),
         BackgroundColor3 = C.stroke,
         BackgroundTransparency = 0.35,
         BorderSizePixel = 0,
     }, box)
     new("TextLabel", {
-        Size = UDim2.new(1, -86, 0, 16),
-        Position = UDim2.fromOffset(14, 5),
+        Size = UDim2.new(1, -80, 0, 14),
+        Position = UDim2.fromOffset(12, 4),
         BackgroundTransparency = 1,
         Text = label,
         TextColor3 = C.sub,
         Font = FONT,
-        TextSize = 11,
+        TextSize = 10,
         TextXAlignment = Enum.TextXAlignment.Left,
     }, box)
     local chip = new("TextLabel", {
-        Size = UDim2.fromOffset(56, 16),
-        Position = UDim2.new(1, -70, 0, 5),
+        Size = UDim2.fromOffset(48, 14),
+        Position = UDim2.new(1, -60, 0, 4),
         BackgroundColor3 = C.press,
         BorderSizePixel = 0,
         Text = "",
         TextColor3 = C.accent,
         Font = FONT_B,
-        TextSize = 11,
+        TextSize = 10,
     }, box)
-    round(chip, 8)
+    round(chip, 7)
     local hit = new("Frame", {
-        Size = UDim2.new(1, -28, 0, 20),
-        Position = UDim2.fromOffset(14, 20),
+        Size = UDim2.new(1, -24, 0, 16),
+        Position = UDim2.fromOffset(12, 17),
         BackgroundTransparency = 1,
         Active = true,
     }, box)
@@ -1469,13 +1470,13 @@ function UI.slider(card, y, label, MIN, MAX, STEP, init, fmt, onChange)
     round(fill, 3)
     new("UIGradient", {Color = ColorSequence.new(C.accent, C.accent2)}, fill)
     local knob = new("Frame", {
-        Size = UDim2.fromOffset(14, 14),
+        Size = UDim2.fromOffset(12, 12),
         AnchorPoint = Vector2.new(0.5, 0.5),
         Position = UDim2.fromScale(0, 0.5),
         BackgroundColor3 = Color3.new(1, 1, 1),
         BorderSizePixel = 0,
     }, bar)
-    round(knob, 7)
+    round(knob, 6)
     new("UIStroke", {Color = C.accent, Thickness = 2}, knob)
     local knobScale = new("UIScale", {Scale = 1}, knob)
 
@@ -1522,11 +1523,11 @@ end
 
 -- Segmented control (Off / Semi / Inf). options = {{id, text, color, hint}}
 function UI.segment(parent, text, options, init, onChange)
-    local card, stroke, bar = UI.card(parent, 54)
-    bar.Size = UDim2.new(0, 3, 0, 18)
+    local card, stroke, bar = UI.card(parent, 44)
+    bar.Size = UDim2.new(0, 3, 0, 16)
     new("TextLabel", {
-        Size = UDim2.fromOffset(70, 34),
-        Position = UDim2.fromOffset(14, 0),
+        Size = UDim2.fromOffset(60, 28),
+        Position = UDim2.fromOffset(12, 0),
         BackgroundTransparency = 1,
         Text = text,
         TextColor3 = C.text,
@@ -1535,8 +1536,8 @@ function UI.segment(parent, text, options, init, onChange)
         TextXAlignment = Enum.TextXAlignment.Left,
     }, card)
     local holder = new("Frame", {
-        Size = UDim2.fromOffset(150, 24),
-        Position = UDim2.new(1, -160, 0, 5),
+        Size = UDim2.fromOffset(132, 22),
+        Position = UDim2.new(1, -140, 0, 3),
         BackgroundColor3 = C.bg,
         BorderSizePixel = 0,
     }, card)
@@ -1545,8 +1546,8 @@ function UI.segment(parent, text, options, init, onChange)
     new("UIPadding", {PaddingLeft = UDim.new(0, 2), PaddingRight = UDim.new(0, 2), PaddingTop = UDim.new(0, 2), PaddingBottom = UDim.new(0, 2)}, holder)
     new("UIListLayout", {FillDirection = Enum.FillDirection.Horizontal, SortOrder = Enum.SortOrder.LayoutOrder}, holder)
     local hintLbl = new("TextLabel", {
-        Size = UDim2.new(1, -28, 0, 14),
-        Position = UDim2.fromOffset(14, 34),
+        Size = UDim2.new(1, -24, 0, 12),
+        Position = UDim2.fromOffset(12, 28),
         BackgroundTransparency = 1,
         Text = "",
         TextColor3 = C.sub,
@@ -1587,7 +1588,7 @@ function UI.segment(parent, text, options, init, onChange)
             Text = o.text,
             TextColor3 = C.sub,
             Font = FONT_B,
-            TextSize = 11,
+            TextSize = 10,
         }, holder)
         round(b, 6)
         btns[o.id] = b
@@ -1609,32 +1610,32 @@ function UI.segment(parent, text, options, init, onChange)
     }
 end
 
--- Grid preset 2x2 + baris info. list = {{id, text, color, info}}
+-- Satu baris 4 chip + baris info. list = {{id, text, color, info}}
 function UI.presets(parent, list, onPick)
-    local card = UI.card(parent, 138)
+    local card = UI.card(parent, 72)
     new("TextLabel", {
-        Size = UDim2.new(1, -28, 0, 14),
-        Position = UDim2.fromOffset(14, 6),
+        Size = UDim2.new(1, -24, 0, 12),
+        Position = UDim2.fromOffset(12, 4),
         BackgroundTransparency = 1,
         Text = "PRESET",
         TextColor3 = C.sub,
         Font = FONT_B,
-        TextSize = 10,
+        TextSize = 9,
         TextXAlignment = Enum.TextXAlignment.Left,
     }, card)
     local grid = new("Frame", {
-        Size = UDim2.new(1, -16, 0, 76),
-        Position = UDim2.fromOffset(8, 22),
+        Size = UDim2.new(1, -16, 0, 26),
+        Position = UDim2.fromOffset(8, 18),
         BackgroundTransparency = 1,
     }, card)
     new("UIGridLayout", {
-        CellSize = UDim2.new(0.5, -3, 0, 35),
-        CellPadding = UDim2.fromOffset(6, 6),
+        CellSize = UDim2.new(0.25, -3, 1, 0),
+        CellPadding = UDim2.fromOffset(4, 0),
         SortOrder = Enum.SortOrder.LayoutOrder,
     }, grid)
     local info = new("TextLabel", {
-        Size = UDim2.new(1, -28, 0, 30),
-        Position = UDim2.fromOffset(14, 102),
+        Size = UDim2.new(1, -20, 0, 24),
+        Position = UDim2.fromOffset(10, 46),
         BackgroundTransparency = 1,
         Text = "",
         TextColor3 = C.sub,
@@ -1645,14 +1646,13 @@ function UI.presets(parent, list, onPick)
         TextYAlignment = Enum.TextYAlignment.Top,
     }, card)
 
-    local chips, sel = {}, nil
+    local chips = {}
     local function select(id)
-        sel = id
         for _, p in ipairs(list) do
             local ch = chips[p.id]
             local on = p.id == id
-            ease(ch.btn, {BackgroundColor3 = on and C.press or C.bg, TextColor3 = on and C.text or C.sub})
-            ease(ch.stroke, {Color = on and p.color or C.stroke, Transparency = on and 0.1 or 0})
+            ease(ch.btn, {BackgroundColor3 = on and C.press or C.bg, TextColor3 = on and p.color or C.sub})
+            ease(ch.stroke, {Color = on and p.color or C.stroke})
             if on then info.Text = p.info end
         end
         if id == nil then info.Text = "Custom - atur manual di bawah." end
@@ -1666,18 +1666,10 @@ function UI.presets(parent, list, onPick)
             Text = p.text,
             TextColor3 = C.sub,
             Font = FONT_B,
-            TextSize = 12,
+            TextSize = 10,
         }, grid)
-        round(b, 9)
-        new("UIPadding", {PaddingLeft = UDim.new(0, 18)}, b)
+        round(b, 7)
         local st = new("UIStroke", {Color = C.stroke, Thickness = 1}, b)
-        local d = new("Frame", {
-            Size = UDim2.fromOffset(7, 7),
-            Position = UDim2.new(0, -11, 0.5, -3),
-            BackgroundColor3 = p.color,
-            BorderSizePixel = 0,
-        }, b)
-        round(d, 4)
         chips[p.id] = {btn = b, stroke = st}
         b.Activated:Connect(function() onPick(p.id) end)
     end
@@ -1702,14 +1694,14 @@ end
 --// ======================= TAB MAIN =======================
 -- Preset: easy, stamina mode, speed on + multiplier
 local PLIST = {
-    {id = "supersafe", text = "Super Safe", color = C.ok,
-        info = "Easy On · Stamina Off · Speed 1.05x. Paling aman, nyaris gak kelihatan."},
+    {id = "supersafe", text = "Safe", color = C.ok,
+        info = "Super Safe: Easy · Stamina Off · 1.05x. Paling aman."},
     {id = "medium", text = "Medium", color = Color3.fromRGB(163, 230, 53),
-        info = "Easy On · Stamina Off · Speed 1.10x. Aman, boost tipis."},
-    {id = "semi", text = "Semi Safe", color = Color3.fromRGB(56, 189, 248),
-        info = "Easy On · Stamina Semi · Speed 1.10x. Stamina irit & isi cepat, bukan infinity."},
+        info = "Medium: Easy · Stamina Off · 1.10x. Aman, boost tipis."},
+    {id = "semi", text = "Semi", color = Color3.fromRGB(56, 189, 248),
+        info = "Semi Safe: Easy · Stamina Semi · 1.10x. Irit, bukan infinity."},
     {id = "agresif", text = "Agresif", color = C.danger,
-        info = "Easy On · Stamina Inf · Speed 1.25x. BISA KENA BAN, pakai sesekali aja."},
+        info = "Agresif: Easy · Stamina Inf · 1.25x. BISA KENA BAN, sesekali aja."},
 }
 local PRESETS = {
     supersafe = {easy = true, stam = "off", speed = true, mult = 1.05},
@@ -1762,7 +1754,7 @@ end)
 do
     local card, y, a = UI.toggle(pages.Main, "Speed Boost", cfg.speed, function(v)
         userEdit(); apply("speed", v, setSpeed)
-    end, {extra = 40})
+    end, {extra = 34})
     apiSpeed = a
     sldSpeed = UI.slider(card, y, "Multiplier", 1.05, 1.5, 0.05, cfg.mult,
         function(v) return string.format("%.2fx", v) end,
@@ -1780,7 +1772,7 @@ UI.toggle(pages.QTE, "Debug log (F9)", env.PanelDebug == true, function(v) env.P
 
 --// ======================= TAB VISUAL =======================
 do
-    local card, y = UI.toggle(pages.Visual, "Soft Light & Color", cfg.light, function(v) apply("light", v, setLight) end, {extra = 40})
+    local card, y = UI.toggle(pages.Visual, "Soft Light & Color", cfg.light, function(v) apply("light", v, setLight) end, {extra = 34})
     UI.slider(card, y, "Tone (tinggi = lebih datar)", 0.2, 1, 0.05, cfg.tone,
         function(v) return string.format("%d%%", math.floor(v * 100 + 0.5)) end,
         function(v)
@@ -1796,8 +1788,8 @@ UI.toggle(pages.Visual, "Hide Effects", cfg.fx, function(v) apply("fx", v, setFx
 local dotStam, dotQte, dotVis
 do
     local footer = new("Frame", {
-        Size = UDim2.new(1, -20, 0, 18),
-        Position = UDim2.new(0, 10, 1, -24),
+        Size = UDim2.new(1, -16, 0, 16),
+        Position = UDim2.new(0, 8, 1, -20),
         BackgroundTransparency = 1,
     }, window)
     new("Frame", {
@@ -1816,13 +1808,13 @@ do
         }, footer)
         round(d, 4)
         new("TextLabel", {
-            Size = UDim2.fromOffset(60, 16),
-            Position = UDim2.new(0, x + 12, 0.5, -8),
+            Size = UDim2.fromOffset(56, 14),
+            Position = UDim2.new(0, x + 12, 0.5, -7),
             BackgroundTransparency = 1,
             Text = text,
             TextColor3 = C.sub,
             Font = FONT,
-            TextSize = 11,
+            TextSize = 10,
             TextXAlignment = Enum.TextXAlignment.Left,
         }, footer)
         return d
