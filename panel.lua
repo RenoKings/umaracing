@@ -1,4 +1,4 @@
---// Panel v20 — Presets · Easy Control · Stamina (Off/Semi/Inf) · Speed Boost · Auto QTE · Visual
+--// Panel v21 — Presets · Easy Control · Stamina (Off/Semi/Inf) · Speed Boost · Auto QTE · Visual
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UIS = game:GetService("UserInputService")
@@ -267,31 +267,49 @@ local setStamLoop = hook(RunService.Heartbeat, function(dt)
     end
     if os.clock() - scanAt > (mode == "semi" and 15 or 30) then scan() end
 end)
--- Semi: server/HUD ngirim nilai Info.Stamina; tiap penurunan dikembaliin (1-SEMI_USE) bagian,
--- tiap kenaikan (isi ulang) ditambah bonus (SEMI_REGEN-1). Cuma geser nilai, gak pernah ngunci penuh.
-local semiLast
-local setSemiLoop = hook(RunService.Heartbeat, function()
+-- Semi: stamina "virtual". Server ngirim nilai ABSOLUT lewat UpdateClientStamina (~10x/dtk), jadi refund relatif ke
+-- nilai Info.Stamina yang kita tulis sendiri gak bakal nahan (ketimpa nilai server tiap update).
+-- Di sini selisih antar nilai server (bukan nilai yang kita tulis) diskalakan: turun x SEMI_USE, naik kecil x SEMI_REGEN,
+-- lalu hasilnya ditulis ke Info.Stamina tiap frame (di atas nilai server, gak pernah ngunci penuh).
+local semiV, semiRaw, semiConn
+local function semiRemote(v)
+    if type(v) ~= "number" then return end
+    local info = player:FindFirstChild("Info")
+    local mx = info and info:FindFirstChild("MaxStamina")
+    local m = mx and mx.Value or 150
+    if semiV == nil or semiRaw == nil then semiV, semiRaw = v, v; return end
+    local d = v - semiRaw
+    semiRaw = v
+    if d < 0 then
+        semiV += d * SEMI_USE
+    elseif d > 0 then
+        semiV += d * ((d <= 6) and SEMI_REGEN or 1) -- isi kecil = regen biasa (dipercepat); loncatan besar = bonus/zone, apa adanya
+    end
+    semiV = math.clamp(math.max(semiV, v), 0, m)
+    if env.PanelDebug then dbg("semi raw", v, "virtual", math.floor(semiV + 0.5)) end
+end
+local semiRemoteSafe = safe(semiRemote)
+local semiStep = safe(function()
+    if semiV == nil then return end
     local info = player:FindFirstChild("Info")
     local st = info and info:FindFirstChild("Stamina")
-    local mx = info and info:FindFirstChild("MaxStamina")
-    if not (st and mx) then semiLast = nil; return end
-    local cur, m = st.Value, mx.Value
-    if semiLast then
-        local d = cur - semiLast
-        local nv = cur
-        if d < 0 then
-            nv = cur + (-d) * (1 - SEMI_USE)
-        elseif d > 0 and d < m * 0.5 then
-            nv = cur + d * (SEMI_REGEN - 1)
-        end
-        nv = math.min(m, math.floor(nv + 0.5))
-        if nv ~= cur then
-            st.Value = nv
-            if env.PanelDebug then dbg("semi", cur, "->", nv) end
-        end
-    end
-    semiLast = st.Value
+    if not st then return end
+    local nv = math.floor(semiV + 0.5)
+    if st.Value ~= nv then st.Value = nv end
 end)
+local function setSemi(on)
+    pcall(function() RunService:UnbindFromRenderStep("PanelSemi") end)
+    if semiConn then semiConn:Disconnect(); semiConn = nil end
+    semiV, semiRaw = nil, nil
+    if not on then return end
+    local rem = game:GetService("ReplicatedStorage"):FindFirstChild("remotes")
+    local ev = rem and rem:FindFirstChild("UpdateClientStamina")
+    if ev and ev:IsA("RemoteEvent") then semiConn = ev.OnClientEvent:Connect(semiRemoteSafe) end
+    local info = player:FindFirstChild("Info")
+    local st = info and info:FindFirstChild("Stamina")
+    if st then semiV, semiRaw = st.Value, st.Value end
+    RunService:BindToRenderStep("PanelSemi", Enum.RenderPriority.Last.Value, semiStep)
+end
 local function setStamMode(mode)
     if mode ~= "semi" and mode ~= "inf" then mode = "off" end
     if mode == stamMode then return end
@@ -301,8 +319,7 @@ local function setStamMode(mode)
     if stamEvConn then stamEvConn:Disconnect(); stamEvConn = nil end
     drainT, drainGap, evGap = 0, 2, 1.5
     setStamLoop(mode ~= "off")
-    semiLast = nil
-    setSemiLoop(mode == "semi")
+    setSemi(mode == "semi")
     if mode == "inf" then
         local rem = game:GetService("ReplicatedStorage"):FindFirstChild("remotes")
         local ev = rem and rem:FindFirstChild("UpdateClientStamina")
@@ -423,12 +440,12 @@ end
 --  * Gate   : QTEGui.GateQTE (4 beat, posisi acak). Tap di tengah lingkaran GATE_T detik setelah frame muncul.
 --  * Stamina: QTEGui.StaminaQTE. Pointer (Time) muter, Star = titik Great. Tap diprediksi dari putaran pointer,
 --             dikirim lewat QTEButton biar tepat (STAM_LEAD = kompensasi latensi, detik).
--- Tuning manual (opsional, sebelum execute): getgenv().PanelStamLead = 0.02 ; getgenv().PanelStamSnap = false
+-- Tuning manual (opsional, sebelum execute): getgenv().PanelStamLead = 0.05 (detik, makin besar = tap makin awal) ; getgenv().PanelStamSnap = true
 local GuiService = game:GetService("GuiService")
 local VIM = game:GetService("VirtualInputManager")
 
-local SNAP = env.PanelStamSnap ~= false -- geser pointer pas di bintang sesaat sebelum tap (anti frame-skip)
-local STAM_LEAD = tonumber(env.PanelStamLead) or 0.02
+local SNAP = env.PanelStamSnap == true -- (opsional, default mati) geser pointer pas di bintang sesaat sebelum tap
+local STAM_LEAD = tonumber(env.PanelStamLead) or 0.05
 
 local function centerOf(o) return o.AbsolutePosition + o.AbsoluteSize / 2 end
 local function absRot(o)
@@ -1192,7 +1209,7 @@ do
     local ver = new("TextLabel", {
         Size = UDim2.fromOffset(30, 16), Position = UDim2.fromOffset(86, 10),
         BackgroundColor3 = C.surface, BorderSizePixel = 0,
-        Text = "v20", TextColor3 = C.sub, Font = FONT, TextSize = 10,
+        Text = "v21", TextColor3 = C.sub, Font = FONT, TextSize = 10,
     }, header)
     round(ver, 8)
 
