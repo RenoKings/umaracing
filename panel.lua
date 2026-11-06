@@ -1,4 +1,4 @@
---// Panel v19 — Presets · Easy Control · Stamina (Off/Semi/Inf) · Speed Boost · Auto QTE · Visual
+--// Panel v20 — Presets · Easy Control · Stamina (Off/Semi/Inf) · Speed Boost · Auto QTE · Visual
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UIS = game:GetService("UserInputService")
@@ -38,7 +38,7 @@ local WIN_H = math.clamp(math.floor(_vp.Y) - 28, 250, 344)
 --// Settings (disimpan otomatis)
 local FILE = "panel_settings.json"
 local cfg = {
-    easy = false, stamMode = "off", speed = false, mult = 1.1, qGate = false, qStam = false, preset = "",
+    easy = false, stamMode = "off", speed = false, mult = 1.1, qStam = false, preset = "",
     light = false, tex = false, fx = false, tone = 0.6,
     wx = -1, wy = -1,
 }
@@ -267,6 +267,31 @@ local setStamLoop = hook(RunService.Heartbeat, function(dt)
     end
     if os.clock() - scanAt > (mode == "semi" and 15 or 30) then scan() end
 end)
+-- Semi: server/HUD ngirim nilai Info.Stamina; tiap penurunan dikembaliin (1-SEMI_USE) bagian,
+-- tiap kenaikan (isi ulang) ditambah bonus (SEMI_REGEN-1). Cuma geser nilai, gak pernah ngunci penuh.
+local semiLast
+local setSemiLoop = hook(RunService.Heartbeat, function()
+    local info = player:FindFirstChild("Info")
+    local st = info and info:FindFirstChild("Stamina")
+    local mx = info and info:FindFirstChild("MaxStamina")
+    if not (st and mx) then semiLast = nil; return end
+    local cur, m = st.Value, mx.Value
+    if semiLast then
+        local d = cur - semiLast
+        local nv = cur
+        if d < 0 then
+            nv = cur + (-d) * (1 - SEMI_USE)
+        elseif d > 0 and d < m * 0.5 then
+            nv = cur + d * (SEMI_REGEN - 1)
+        end
+        nv = math.min(m, math.floor(nv + 0.5))
+        if nv ~= cur then
+            st.Value = nv
+            if env.PanelDebug then dbg("semi", cur, "->", nv) end
+        end
+    end
+    semiLast = st.Value
+end)
 local function setStamMode(mode)
     if mode ~= "semi" and mode ~= "inf" then mode = "off" end
     if mode == stamMode then return end
@@ -276,6 +301,8 @@ local function setStamMode(mode)
     if stamEvConn then stamEvConn:Disconnect(); stamEvConn = nil end
     drainT, drainGap, evGap = 0, 2, 1.5
     setStamLoop(mode ~= "off")
+    semiLast = nil
+    setSemiLoop(mode == "semi")
     if mode == "inf" then
         local rem = game:GetService("ReplicatedStorage"):FindFirstChild("remotes")
         local ev = rem and rem:FindFirstChild("UpdateClientStamina")
@@ -396,11 +423,11 @@ end
 --  * Gate   : QTEGui.GateQTE (4 beat, posisi acak). Tap di tengah lingkaran GATE_T detik setelah frame muncul.
 --  * Stamina: QTEGui.StaminaQTE. Pointer (Time) muter, Star = titik Great. Tap diprediksi dari putaran pointer,
 --             dikirim lewat QTEButton biar tepat (STAM_LEAD = kompensasi latensi, detik).
--- Tuning manual (opsional, sebelum execute): getgenv().PanelGateT = 0.56 ; getgenv().PanelStamLead = 0.02
+-- Tuning manual (opsional, sebelum execute): getgenv().PanelStamLead = 0.02 ; getgenv().PanelStamSnap = false
 local GuiService = game:GetService("GuiService")
 local VIM = game:GetService("VirtualInputManager")
 
-local GATE_T = tonumber(env.PanelGateT) or 0.56
+local SNAP = env.PanelStamSnap ~= false -- geser pointer pas di bintang sesaat sebelum tap (anti frame-skip)
 local STAM_LEAD = tonumber(env.PanelStamLead) or 0.02
 
 local function centerOf(o) return o.AbsolutePosition + o.AbsoluteSize / 2 end
@@ -427,7 +454,7 @@ local function newInput(pos)
     }
 end
 
-local qCount, qLabel = {gate = 0, stam = 0}, {}
+local qCount, qLabel = {stam = 0}, {}
 
 --// ---- Cara kirim input (dicoba berurutan, yang berhasil diingat) ----
 local function fireButton(b, pos)
@@ -495,7 +522,7 @@ local function vimSend(want, withInset, isMouse)
     return true
 end
 local METHODS = {
-    btn = function(c) return fireButton(c.qb, c.pos) end,
+    btn = function(c) return fireButton(c.qb, c.raw) end,
     fbtn = function(c) return fireButton(c.frame, c.pos) end,
     uis = function(c) return fireAllUis(c.pos) end,
     touch = function(c) return vimSend(c.pos, true, false) end,
@@ -506,10 +533,9 @@ local METHODS = {
     mouse = function(c) return vimSend(c.pos, true, true) end,
 }
 local ORDER = {
-    gate = {"touch", "touch0", "mouse", "uis", "fbtn"},
     stam = {"btn", "touch", "touch0", "uis"},
 }
-local bestM = {gate = 1, stam = 1}
+local bestM = {stam = 1}
 
 -- "Diterima" = game nge-spawn fx_ring / fx_spark (di frame) atau StaminaQTEState (di QTEGui) setelah input masuk.
 local function press(frame, kind)
@@ -519,7 +545,7 @@ local function press(frame, kind)
         local qb = playerGui:FindFirstChild("QTEButtonGui")
         qb = qb and qb:FindFirstChild("QTEButton")
         local tgt = (kind == "stam" and qb) or frame
-        local c = {qb = qb, frame = frame, pos = inputPos(tgt)}
+        local c = {qb = qb, frame = frame, pos = inputPos(tgt), raw = centerOf(tgt)}
 
         local seen = false
         local function onAdd(ch)
@@ -546,7 +572,7 @@ local function press(frame, kind)
                     break
                 end
             end
-            c.pos = inputPos(tgt) -- posisi bisa berubah, ambil ulang buat percobaan berikutnya
+            c.pos, c.raw = inputPos(tgt), centerOf(tgt)
         end
         c1:Disconnect()
         c2:Disconnect()
@@ -586,18 +612,7 @@ local function makeWatcher(onFrame)
     end
 end
 
---// ---- Modul 1: Gate QTE ----
-local gateSeen = setmetatable({}, {__mode = "k"})
-local setGate = makeWatcher(function(f)
-    if f.Name ~= "GateQTE" or not f:IsA("GuiButton") or gateSeen[f] then return end
-    gateSeen[f] = true
-    dbg("gate beat")
-    task.delay(GATE_T, function()
-        if f.Parent then press(f, "gate") end -- posisi dihitung ulang pas tap (layout sudah final)
-    end)
-end)
-
---// ---- Modul 2: Stamina QTE ----
+--// ---- Stamina QTE ----
 local function dumpQte(frame)
     warn("[Panel] ---- dump", frame.Name, frame.AbsolutePosition, frame.AbsoluteSize)
     local base = #frame:GetFullName() + 2
@@ -611,8 +626,9 @@ local function dumpQte(frame)
 end
 
 -- RenderStep (priority Last) hidup cuma selama satu QTE.
--- Sudut pointer dibaca dari .Rotation (bukan AbsoluteRotation yang telat 1 frame), tanpa tunggu intro:
--- cukup 3 sampel putaran + posisi Star stabil. Tap saat sisa sudut <= spd*(setengah frame + STAM_LEAD).
+-- signed = jarak sudut pointer ke Star (+ = Star di depan, - = baru lewat). Tap kalau -passed <= signed <= half.
+-- "passed" nangkep kasus frame ke-skip (FPS rendah): dulu kelewat = nunggu 1 putaran penuh = baru kena pas QTE selesai.
+-- SNAP: pointer digeser tepat ke Star sesaat sebelum tap, jadi hasilnya gak bergantung ke FPS.
 local stamId = 0
 local function runStamina(frame)
     stamId += 1
@@ -655,27 +671,28 @@ local function runStamina(frame)
             dir = dR > 0 and 1 or -1
             samples += 1
             local inst = math.abs(dR) / dt
-            spd = spd == 0 and inst or (spd * 0.7 + inst * 0.3)
+            spd = spd == 0 and inst or (spd * 0.5 + inst * 0.5)
         end
-        if samples < 3 or not dir or spd < 20 then return end
+        if samples < 2 or not dir or spd < 20 then return end
 
         local v = centerOf(star) - centerOf(tf)
         if v.Magnitude < 1 then return end
         local target = math.deg(math.atan2(v.X, -v.Y)) -- derajat searah jarum jam dari atas
-        if lastTarget and math.abs((target - lastTarget + 540) % 360 - 180) < 1.5 then
+        if lastTarget and math.abs((target - lastTarget + 540) % 360 - 180) < 3 then
             stable += 1
         else
             stable = 0
         end
         lastTarget = target
-        if stable < 2 then return end
+        if stable < 1 then return end
 
-        local remain = ((target - pr) * dir) % 360
+        local signed = (((target - pr) * dir) + 180) % 360 - 180
         local half = spd * (dt * 0.5 + STAM_LEAD)
-        if remain > 360 - half then remain -= 360 end -- baru lewat sedikit
-        if remain <= half then
+        local passed = math.max(spd * dt * 1.5, 12)
+        if signed <= half and signed >= -passed then
             stop()
-            dbg("stam fire", string.format("remain=%.1f spd=%.0f dt=%.3f", remain, spd, dt))
+            dbg("stam fire", string.format("signed=%.1f spd=%.0f dt=%.3f dir=%d target=%.0f", signed, spd, dt, dir, target))
+            if SNAP then pcall(function() tm.Rotation = target - parentRot end) end
             press(frame, "stam")
         end
     end)
@@ -1175,7 +1192,7 @@ do
     local ver = new("TextLabel", {
         Size = UDim2.fromOffset(30, 16), Position = UDim2.fromOffset(86, 10),
         BackgroundColor3 = C.surface, BorderSizePixel = 0,
-        Text = "v19", TextColor3 = C.sub, Font = FONT, TextSize = 10,
+        Text = "v20", TextColor3 = C.sub, Font = FONT, TextSize = 10,
     }, header)
     round(ver, 8)
 
@@ -1739,12 +1756,10 @@ do
 end
 
 --// ======================= TAB QTE =======================
-UI.toggle(pages.QTE, "Auto Gate QTE", cfg.qGate, function(v) apply("qGate", v, setGate) end,
-    {hint = "Tap tengah lingkaran (4 beat)", counter = "gate"})
 UI.toggle(pages.QTE, "Auto Stamina QTE", cfg.qStam, function(v) apply("qStam", v, setStam) end,
     {hint = "Tap pas pointer kena bintang", counter = "stam"})
 UI.toggle(pages.QTE, "Debug log (F9)", env.PanelDebug == true, function(v) env.PanelDebug = v end,
-    {hint = "Buat laporan kalau tap meleset"})
+    {hint = "Log tap & stamina ke console (F9)"})
 
 --// ======================= TAB VISUAL =======================
 do
@@ -1804,7 +1819,7 @@ local function refreshStatus()
         or ((#cfgs == 0) and C.warn)
         or ((cfg.stamMode == "inf" and os.clock() - leakAt < 3) and C.danger)
         or C.ok
-    dotQte.BackgroundColor3 = (cfg.qGate or cfg.qStam) and C.ok or C.off
+    dotQte.BackgroundColor3 = cfg.qStam and C.ok or C.off
     dotVis.BackgroundColor3 = (cfg.light or cfg.tex or cfg.fx) and C.ok or C.off
 end
 task.spawn(function()
@@ -1819,7 +1834,6 @@ local function cleanup()
     setStamMode("off")
     setEasy(false)
     setSpeed(false)
-    setGate(false)
     setStam(false)
     setLight(false)
     setTex(false)
@@ -1834,7 +1848,6 @@ closeBtn.Activated:Connect(cleanup)
 if cfg.easy then setActive("easy", true); setEasy(true) end
 if cfg.stamMode ~= "off" then setActive("stam", true); setStamMode(cfg.stamMode) end
 if cfg.speed then setActive("speed", true); setSpeed(true) end
-if cfg.qGate then setActive("qGate", true); setGate(true) end
 if cfg.qStam then setActive("qStam", true); setStam(true) end
 if cfg.light then setActive("light", true); setLight(true) end
 if cfg.tex then setActive("tex", true); setTex(true) end
