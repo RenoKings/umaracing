@@ -11,36 +11,39 @@ local env = (getgenv and getgenv()) or _G
 local Terrain = workspace:FindFirstChildOfClass("Terrain")
 
 if env.__PanelCleanup then pcall(env.__PanelCleanup) end
-local oldGui = playerGui:FindFirstChild("Panel")
-if oldGui then oldGui:Destroy() end
+for _, n in ipairs({"ArcHub", "Panel"}) do
+    local old = playerGui:FindFirstChild(n)
+    if old then old:Destroy() end
+end
 
 local C = {
-    bg      = Color3.fromRGB(16, 16, 21),
-    surface = Color3.fromRGB(26, 26, 33),
-    press   = Color3.fromRGB(34, 34, 43),
-    stroke  = Color3.fromRGB(48, 48, 60),
-    text    = Color3.fromRGB(236, 236, 244),
-    sub     = Color3.fromRGB(130, 130, 150),
+    bg      = Color3.fromRGB(19, 19, 22),
+    surface = Color3.fromRGB(28, 28, 32),
+    press   = Color3.fromRGB(38, 38, 43),
+    stroke  = Color3.fromRGB(45, 45, 52),
+    text    = Color3.fromRGB(230, 230, 234),
+    sub     = Color3.fromRGB(125, 125, 136),
     accent  = Color3.fromRGB(240, 118, 72),
     accent2 = Color3.fromRGB(255, 166, 98),
-    off     = Color3.fromRGB(54, 54, 68),
-    danger  = Color3.fromRGB(239, 68, 68),
-    ok      = Color3.fromRGB(74, 222, 128),
+    off     = Color3.fromRGB(58, 58, 67),
+    danger  = Color3.fromRGB(226, 72, 72),
 }
-local FONT, FONT_B = Enum.Font.GothamMedium, Enum.Font.GothamBold
-local WIN_W = 210
+local FONT, FONT_B = Enum.Font.BuilderSansMedium, Enum.Font.BuilderSansBold
+local WIN_W = 228
 local _vp = (workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize) or Vector2.new(800, 400)
-local WIN_H = math.clamp(math.floor(_vp.Y * 0.62), 170, 230)
+local WIN_H = math.clamp(math.floor(_vp.Y * 0.66), 190, 260)
 
-local FILE = "panel_settings.json"
+local FILE = "archub_settings.json"
+local OLD_FILE = "panel_settings.json"
 local cfg = {
     easy = false, stamMode = "off", speed = false, mult = 1.1, qStam = false, preset = "",
     light = false, tex = false, fx = false, tone = 0.6,
     wx = -1, wy = -1,
 }
 pcall(function()
-    if isfile and isfile(FILE) then
-        local d = HttpService:JSONDecode(readfile(FILE))
+    local src = isfile and ((isfile(FILE) and FILE) or (isfile(OLD_FILE) and OLD_FILE))
+    if src then
+        local d = HttpService:JSONDecode(readfile(src))
         for k, def in pairs(cfg) do
             if type(d[k]) == type(def) then cfg[k] = d[k] end
         end
@@ -80,7 +83,7 @@ end
 local function ease(o, props)
     TweenService:Create(o, TweenInfo.new(0.12, Enum.EasingStyle.Quad), props):Play()
 end
-local function dbg(...) if env.PanelDebug then warn("[Panel]", ...) end end
+local function dbg(...) if env.PanelDebug then warn("[Arc Hub]", ...) end end
 
 local function safe(fn)
     return function(...)
@@ -251,13 +254,13 @@ local setStamLoop = hook(RunService.Heartbeat, function(dt)
     if mode == "inf" and os.clock() - scanAt > 90 then scan() end
 end)
 
-local semiV, semiRaw, semiConn, semiWriting
+local semiV, semiRaw, semiConn, semiOut, semiOutT
 local semiTok = 0
 setSemi = function(on)
     semiTok += 1
     local tok = semiTok
     if semiConn then semiConn:Disconnect(); semiConn = nil end
-    semiV, semiRaw, semiSt = nil, nil, nil
+    semiV, semiRaw, semiSt, semiOut = nil, nil, nil, nil
     if not on then return end
     task.spawn(function()
         local info = player:WaitForChild("Info", 15)
@@ -267,8 +270,11 @@ setSemi = function(on)
         semiSt = st
         semiV, semiRaw = st.Value, st.Value
         semiConn = st:GetPropertyChangedSignal("Value"):Connect(function()
-            if semiWriting then return end
             local raw, m = st.Value, mx.Value
+            if semiOut and raw == semiOut and os.clock() - semiOutT < 0.5 then
+                semiOut = nil
+                return
+            end
             local d = raw - semiRaw
             semiRaw = raw
             if d < 0 then
@@ -279,10 +285,8 @@ setSemi = function(on)
             semiV = math.clamp(math.max(semiV, raw), 0, m)
             local nv = math.floor(semiV + 0.5)
             if nv ~= raw then
-                semiWriting = true
+                semiOut, semiOutT = nv, os.clock()
                 st.Value = nv
-                semiWriting = false
-                semiRaw = raw
             end
             if env.PanelDebug then dbg("semi raw", raw, "virtual", nv) end
         end)
@@ -540,7 +544,7 @@ local function press(frame, kind)
                     done = true
                     qCount[kind] += 1
                     local lb = qLabel[kind]
-                    if lb then lb.Text = qCount[kind] .. " tap" end
+                    if lb then lb.Text = qCount[kind] .. " taps" end
                     dbg("press ok", kind, order[i], c.pos.X, c.pos.Y)
                     break
                 end
@@ -585,11 +589,11 @@ local function makeWatcher(onFrame)
 end
 
 local function dumpQte(frame)
-    warn("[Panel] ---- dump", frame.Name, frame.AbsolutePosition, frame.AbsoluteSize)
+    warn("[Arc Hub] ---- dump", frame.Name, frame.AbsolutePosition, frame.AbsoluteSize)
     local base = #frame:GetFullName() + 2
     for _, o in ipairs(frame:GetDescendants()) do
         if o:IsA("GuiObject") then
-            warn(string.format("[Panel] %s <%s> vis=%s rot=%.1f absRot=%.1f pos=(%d,%d) size=(%d,%d)",
+            warn(string.format("[Arc Hub] %s <%s> vis=%s rot=%.1f absRot=%.1f pos=(%d,%d) size=(%d,%d)",
                 o:GetFullName():sub(base), o.ClassName, tostring(o.Visible), o.Rotation, absRot(o),
                 o.AbsolutePosition.X, o.AbsolutePosition.Y, o.AbsoluteSize.X, o.AbsoluteSize.Y))
         end
@@ -798,7 +802,7 @@ local function applyLight()
         for _, e in ipairs(cam:GetChildren()) do scanFx(e, t) end
     end
     for _, g in ipairs(playerGui:GetChildren()) do
-        if g:IsA("ScreenGui") and g.Name ~= "Panel" and g.Enabled and isFlareName(g.Name) then
+        if g:IsA("ScreenGui") and g.Name ~= "ArcHub" and g.Enabled and isFlareName(g.Name) then
             guiOff[g] = true
             g.Enabled = false
         end
@@ -1016,7 +1020,7 @@ local function setFx(on)
 end
 
 local gui = new("ScreenGui", {
-    Name = "Panel",
+    Name = "ArcHub",
     ResetOnSpawn = false,
     IgnoreGuiInset = true,
     ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
@@ -1036,34 +1040,42 @@ local window = new("Frame", {
     BackgroundColor3 = C.bg,
     BorderSizePixel = 0,
 }, gui)
-round(window, 12)
+round(window, 10)
 new("UIStroke", {Color = C.stroke, Thickness = 1}, window)
 local winScale = new("UIScale", {Scale = 1}, window)
 do
-    local x, y
-
-    x, y = clampXY(math.floor((viewport().X - WIN_W) / 2), 8, WIN_W, WIN_H)
+    local x, y = clampXY(math.floor((viewport().X - WIN_W) / 2), 8, WIN_W, WIN_H)
     window.Position = UDim2.fromOffset(x, y)
 end
 
-local function mark(parent, s, hole)
+local function mark(parent, s)
     local box = new("Frame", {Size = UDim2.fromOffset(s, s), BackgroundTransparency = 1}, parent)
-    local function diamond(side, color, r)
-        local f = new("Frame", {
-            AnchorPoint = Vector2.new(0.5, 0.5),
-            Position = UDim2.fromScale(0.5, 0.5),
-            Size = UDim2.fromOffset(side, side),
-            Rotation = 45,
-            BackgroundColor3 = color,
-            BorderSizePixel = 0,
-        }, box)
-        round(f, r)
-        return f
-    end
-    local outer = diamond(s * 0.66, Color3.new(1, 1, 1), math.max(2, math.floor(s * 0.16)))
-    new("UIGradient", {Color = ColorSequence.new(C.accent2, C.accent), Rotation = 90}, outer)
-    diamond(s * 0.34, hole, math.max(1, math.floor(s * 0.07)))
-    diamond(s * 0.13, C.accent2, 1)
+    local ring = new("Frame", {
+        AnchorPoint = Vector2.new(0.5, 0.5),
+        Position = UDim2.fromScale(0.5, 0.5),
+        Size = UDim2.fromOffset(s * 0.74, s * 0.74),
+        BackgroundTransparency = 1,
+    }, box)
+    round(ring, s)
+    local stroke = new("UIStroke", {Color = Color3.new(1, 1, 1), Thickness = math.max(2, s * 0.13)}, ring)
+    new("UIGradient", {
+        Color = ColorSequence.new(C.accent2, C.accent),
+        Transparency = NumberSequence.new({
+            NumberSequenceKeypoint.new(0, 0),
+            NumberSequenceKeypoint.new(0.55, 0),
+            NumberSequenceKeypoint.new(0.551, 1),
+            NumberSequenceKeypoint.new(1, 1),
+        }),
+        Rotation = 45,
+    }, stroke)
+    local dot = new("Frame", {
+        AnchorPoint = Vector2.new(0.5, 0.5),
+        Position = UDim2.fromScale(0.762, 0.762),
+        Size = UDim2.fromOffset(s * 0.17, s * 0.17),
+        BackgroundColor3 = C.accent,
+        BorderSizePixel = 0,
+    }, box)
+    round(dot, s)
     return box
 end
 
@@ -1076,15 +1088,15 @@ local bubble = new("TextButton", {
     Visible = false,
 }, gui)
 round(bubble, 20)
-new("UIStroke", {Color = C.accent, Transparency = 0.45, Thickness = 1.5}, bubble)
+new("UIStroke", {Color = C.stroke, Thickness = 1}, bubble)
 local bubScale = new("UIScale", {Scale = 1}, bubble)
 do
-    local m = mark(bubble, 26, C.surface)
+    local m = mark(bubble, 26)
     m.Position = UDim2.fromOffset(7, 7)
 end
 
 local function pop(sc)
-    sc.Scale = 0.85
+    sc.Scale = 0.88
     ease(sc, {Scale = 1})
 end
 
@@ -1132,7 +1144,7 @@ local function restore()
 end
 
 local header = new("Frame", {
-    Size = UDim2.new(1, 0, 0, 30),
+    Size = UDim2.new(1, 0, 0, 36),
     BackgroundTransparency = 1,
     Active = true,
 }, window)
@@ -1141,34 +1153,38 @@ draggable(bubble, bubble, restore)
 
 local closeBtn
 do
-    local m = mark(header, 22, Color3.fromRGB(22, 22, 29))
-    m.Position = UDim2.fromOffset(8, 4)
+    local m = mark(header, 22)
+    m.Position = UDim2.fromOffset(10, 7)
     new("TextLabel", {
-        Size = UDim2.fromOffset(60, 30), Position = UDim2.fromOffset(34, 0), BackgroundTransparency = 1,
-        Text = "Panel", TextColor3 = C.text, Font = FONT_B, TextSize = 13, TextXAlignment = Enum.TextXAlignment.Left,
+        Size = UDim2.fromOffset(100, 36),
+        Position = UDim2.fromOffset(38, 0),
+        BackgroundTransparency = 1,
+        Text = "Arc Hub",
+        TextColor3 = C.text,
+        Font = FONT_B,
+        TextSize = 15,
+        TextXAlignment = Enum.TextXAlignment.Left,
     }, header)
 
     local function headerBtn(text, x, hoverColor)
         local b = new("TextButton", {
-            Size = UDim2.fromOffset(22, 22),
-            Position = UDim2.new(1, x, 0, 4),
-            BackgroundColor3 = C.surface,
+            Size = UDim2.fromOffset(24, 24),
+            Position = UDim2.new(1, x, 0, 6),
+            BackgroundColor3 = C.bg,
             BorderSizePixel = 0,
             AutoButtonColor = false,
             Text = text,
             TextColor3 = C.sub,
             Font = FONT_B,
-            TextSize = 16,
+            TextSize = 17,
         }, header)
-        round(b, 8)
-        b.MouseEnter:Connect(function() ease(b, {TextColor3 = hoverColor}) end)
-        b.MouseLeave:Connect(function() ease(b, {TextColor3 = C.sub}) end)
-        b.MouseButton1Down:Connect(function() b.BackgroundColor3 = C.press end)
-        b.MouseButton1Up:Connect(function() b.BackgroundColor3 = C.surface end)
+        round(b, 6)
+        b.MouseEnter:Connect(function() ease(b, {BackgroundColor3 = C.surface, TextColor3 = hoverColor}) end)
+        b.MouseLeave:Connect(function() ease(b, {BackgroundColor3 = C.bg, TextColor3 = C.sub}) end)
         return b
     end
-    headerBtn("–", -52, C.text).Activated:Connect(minimize)
-    closeBtn = headerBtn("×", -27, C.danger)
+    headerBtn("–", -58, C.text).Activated:Connect(minimize)
+    closeBtn = headerBtn("×", -32, C.danger)
 end
 
 local TABS = {"Main", "QTE", "Visual"}
@@ -1178,32 +1194,36 @@ local function selectTab(name)
     for n, pg in pairs(pages) do pg.Visible = (n == name) end
     for i, n in ipairs(TABS) do
         local on = (n == name)
-        tabBtns[n].TextColor3 = on and Color3.new(1, 1, 1) or C.sub
+        ease(tabBtns[n], {TextColor3 = on and C.text or C.sub})
         if on and pill then
-            ease(pill, {Position = UDim2.new((i - 1) / #TABS, 2, 0, 2)})
+            ease(pill, {Position = UDim2.new((i - 1) / #TABS, 8, 1, -2)})
         end
     end
 end
 do
     local tabBar = new("Frame", {
-        Size = UDim2.new(1, -16, 0, 24),
-        Position = UDim2.fromOffset(8, 33),
-        BackgroundColor3 = C.surface,
-        BorderSizePixel = 0,
+        Size = UDim2.new(1, -16, 0, 26),
+        Position = UDim2.fromOffset(8, 36),
+        BackgroundTransparency = 1,
     }, window)
-    round(tabBar, 8)
-    new("UIStroke", {Color = C.stroke, Thickness = 1}, tabBar)
-    pill = new("Frame", {
-        Size = UDim2.new(1 / #TABS, -4, 1, -4),
-        Position = UDim2.new(0, 2, 0, 2),
-        BackgroundColor3 = C.accent,
+    new("Frame", {
+        Size = UDim2.new(1, 0, 0, 1),
+        Position = UDim2.new(0, 0, 1, -1),
+        BackgroundColor3 = C.stroke,
         BorderSizePixel = 0,
     }, tabBar)
-    round(pill, 6)
+    pill = new("Frame", {
+        Size = UDim2.new(1 / #TABS, -16, 0, 2),
+        Position = UDim2.new(0, 8, 1, -2),
+        BackgroundColor3 = C.accent,
+        BorderSizePixel = 0,
+        ZIndex = 2,
+    }, tabBar)
+    round(pill, 1)
 
     local content = new("Frame", {
         Size = UDim2.new(1, 0, 1, -68),
-        Position = UDim2.fromOffset(0, 62),
+        Position = UDim2.fromOffset(0, 64),
         BackgroundTransparency = 1,
     }, window)
     for i, name in ipairs(TABS) do
@@ -1215,8 +1235,7 @@ do
             Text = name,
             TextColor3 = C.sub,
             Font = FONT_B,
-            TextSize = 11,
-            ZIndex = 2,
+            TextSize = 13,
         }, tabBar)
         tabBtns[name] = b
         b.Activated:Connect(function() selectTab(name) end)
@@ -1226,8 +1245,8 @@ do
             ScrollBarThickness = 2, ScrollBarImageColor3 = C.stroke, CanvasSize = UDim2.new(),
             AutomaticCanvasSize = Enum.AutomaticSize.Y, ScrollingDirection = Enum.ScrollingDirection.Y,
         }, content)
-        new("UIPadding", {PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8), PaddingTop = UDim.new(0, 2), PaddingBottom = UDim.new(0, 4)}, pg)
-        new("UIListLayout", {Padding = UDim.new(0, 5), SortOrder = Enum.SortOrder.LayoutOrder}, pg)
+        new("UIPadding", {PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8), PaddingTop = UDim.new(0, 4), PaddingBottom = UDim.new(0, 6)}, pg)
+        new("UIListLayout", {Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder}, pg)
         pages[name] = pg
     end
 end
@@ -1248,7 +1267,7 @@ end
 function UI.toggle(parent, text, init, onChange, opts)
     opts = opts or {}
     local on = init == true
-    local rowH = opts.hint and 36 or 30
+    local rowH = opts.hint and 42 or 34
     local card = UI.card(parent, rowH + (opts.extra or 0))
     local row = new("TextButton", {
         Size = UDim2.new(1, 0, 0, rowH),
@@ -1256,46 +1275,46 @@ function UI.toggle(parent, text, init, onChange, opts)
         AutoButtonColor = false,
         Text = "",
     }, card)
-    local titleW = opts.counter and -104 or -56
+    local titleW = opts.counter and -108 or -58
     new("TextLabel", {
-        Size = UDim2.new(1, titleW, 0, opts.hint and 16 or rowH),
-        Position = UDim2.fromOffset(12, opts.hint and 4 or 0),
+        Size = UDim2.new(1, titleW, 0, opts.hint and 18 or rowH),
+        Position = UDim2.fromOffset(12, opts.hint and 5 or 0),
         BackgroundTransparency = 1,
         Text = text,
         TextColor3 = C.text,
         Font = FONT,
-        TextSize = 12,
+        TextSize = 13,
         TextXAlignment = Enum.TextXAlignment.Left,
         TextTruncate = Enum.TextTruncate.AtEnd,
     }, row)
     if opts.hint then
         new("TextLabel", {
-            Size = UDim2.new(1, titleW, 0, 12),
-            Position = UDim2.fromOffset(12, 20),
+            Size = UDim2.new(1, titleW, 0, 14),
+            Position = UDim2.fromOffset(12, 23),
             BackgroundTransparency = 1,
             Text = opts.hint,
             TextColor3 = C.sub,
             Font = FONT,
-            TextSize = 10,
+            TextSize = 11,
             TextXAlignment = Enum.TextXAlignment.Left,
             TextTruncate = Enum.TextTruncate.AtEnd,
         }, row)
     end
     if opts.counter then
         qLabel[opts.counter] = new("TextLabel", {
-            Size = UDim2.fromOffset(54, 14),
-            Position = UDim2.new(1, -98, 0, (rowH - 14) / 2),
+            Size = UDim2.fromOffset(56, 14),
+            Position = UDim2.new(1, -102, 0, (rowH - 14) / 2),
             BackgroundTransparency = 1,
-            Text = qCount[opts.counter] .. " tap",
+            Text = qCount[opts.counter] .. " taps",
             TextColor3 = C.sub,
             Font = FONT,
-            TextSize = 10,
+            TextSize = 11,
             TextXAlignment = Enum.TextXAlignment.Right,
         }, row)
     end
     local track = new("Frame", {
         Size = UDim2.fromOffset(32, 18),
-        Position = UDim2.new(1, -42, 0, (rowH - 18) / 2),
+        Position = UDim2.new(1, -44, 0, (rowH - 18) / 2),
         BackgroundColor3 = C.off,
         BorderSizePixel = 0,
     }, row)
@@ -1309,9 +1328,8 @@ function UI.toggle(parent, text, init, onChange, opts)
     round(knob, 6)
 
     local function paint(animate)
-        local col = on and C.accent or C.off
         local props = {
-            {track, {BackgroundColor3 = col}},
+            {track, {BackgroundColor3 = on and C.accent or C.off}},
             {knob, {Position = on and UDim2.fromOffset(17, 3) or UDim2.fromOffset(3, 3)}},
         }
         for _, p in ipairs(props) do
@@ -1348,45 +1366,43 @@ function UI.slider(card, y, label, MIN, MAX, STEP, init, fmt, onChange)
         Size = UDim2.new(1, -24, 0, 1),
         Position = UDim2.fromOffset(12, 0),
         BackgroundColor3 = C.stroke,
-        BackgroundTransparency = 0.35,
         BorderSizePixel = 0,
     }, box)
     new("TextLabel", {
         Size = UDim2.new(1, -80, 0, 14),
-        Position = UDim2.fromOffset(12, 4),
+        Position = UDim2.fromOffset(12, 5),
         BackgroundTransparency = 1,
         Text = label,
         TextColor3 = C.sub,
         Font = FONT,
-        TextSize = 10,
+        TextSize = 11,
         TextXAlignment = Enum.TextXAlignment.Left,
     }, box)
     local chip = new("TextLabel", {
-        Size = UDim2.fromOffset(48, 14),
-        Position = UDim2.new(1, -60, 0, 4),
-        BackgroundColor3 = C.press,
-        BorderSizePixel = 0,
+        Size = UDim2.fromOffset(52, 14),
+        Position = UDim2.new(1, -64, 0, 5),
+        BackgroundTransparency = 1,
         Text = "",
-        TextColor3 = C.accent,
+        TextColor3 = C.text,
         Font = FONT_B,
-        TextSize = 10,
+        TextSize = 12,
+        TextXAlignment = Enum.TextXAlignment.Right,
     }, box)
-    round(chip, 7)
     local hit = new("Frame", {
         Size = UDim2.new(1, -24, 0, 16),
-        Position = UDim2.fromOffset(12, 17),
+        Position = UDim2.fromOffset(12, 18),
         BackgroundTransparency = 1,
         Active = true,
     }, box)
     local bar = new("Frame", {
-        Size = UDim2.new(1, 0, 0, 5),
+        Size = UDim2.new(1, 0, 0, 4),
         Position = UDim2.new(0, 0, 0.5, -2),
         BackgroundColor3 = C.off,
         BorderSizePixel = 0,
     }, hit)
-    round(bar, 3)
+    round(bar, 2)
     local fill = new("Frame", {Size = UDim2.fromScale(0, 1), BackgroundColor3 = C.accent, BorderSizePixel = 0}, bar)
-    round(fill, 3)
+    round(fill, 2)
     local knob = new("Frame", {
         Size = UDim2.fromOffset(12, 12),
         AnchorPoint = Vector2.new(0.5, 0.5),
@@ -1395,7 +1411,6 @@ function UI.slider(card, y, label, MIN, MAX, STEP, init, fmt, onChange)
         BorderSizePixel = 0,
     }, bar)
     round(knob, 6)
-    new("UIStroke", {Color = C.accent, Thickness = 2}, knob)
     local knobScale = new("UIScale", {Scale = 1}, knob)
 
     local cur
@@ -1422,7 +1437,7 @@ function UI.slider(card, y, label, MIN, MAX, STEP, init, fmt, onChange)
         local sf = card:FindFirstAncestorOfClass("ScrollingFrame")
         if sf then sf.ScrollingEnabled = false end
         fromInput(input)
-        ease(knobScale, {Scale = 1.25})
+        ease(knobScale, {Scale = 1.2})
         local cMove, cEnd
         cMove = UIS.InputChanged:Connect(function(i)
             if isMove(i) then fromInput(i) end
@@ -1440,10 +1455,10 @@ function UI.slider(card, y, label, MIN, MAX, STEP, init, fmt, onChange)
 end
 
 function UI.segment(parent, text, options, init, onChange)
-    local card = UI.card(parent, 44)
+    local card = UI.card(parent, 50)
     new("TextLabel", {
-        Size = UDim2.fromOffset(60, 28),
-        Position = UDim2.fromOffset(12, 0),
+        Size = UDim2.fromOffset(64, 30),
+        Position = UDim2.fromOffset(12, 2),
         BackgroundTransparency = 1,
         Text = text,
         TextColor3 = C.text,
@@ -1452,23 +1467,22 @@ function UI.segment(parent, text, options, init, onChange)
         TextXAlignment = Enum.TextXAlignment.Left,
     }, card)
     local holder = new("Frame", {
-        Size = UDim2.fromOffset(132, 22),
-        Position = UDim2.new(1, -140, 0, 3),
+        Size = UDim2.fromOffset(138, 24),
+        Position = UDim2.new(1, -146, 0, 5),
         BackgroundColor3 = C.bg,
         BorderSizePixel = 0,
     }, card)
-    round(holder, 8)
-    new("UIStroke", {Color = C.stroke, Thickness = 1}, holder)
+    round(holder, 7)
     new("UIPadding", {PaddingLeft = UDim.new(0, 2), PaddingRight = UDim.new(0, 2), PaddingTop = UDim.new(0, 2), PaddingBottom = UDim.new(0, 2)}, holder)
     new("UIListLayout", {FillDirection = Enum.FillDirection.Horizontal, SortOrder = Enum.SortOrder.LayoutOrder}, holder)
     local hintLbl = new("TextLabel", {
-        Size = UDim2.new(1, -24, 0, 12),
-        Position = UDim2.fromOffset(12, 28),
+        Size = UDim2.new(1, -24, 0, 14),
+        Position = UDim2.fromOffset(12, 33),
         BackgroundTransparency = 1,
         Text = "",
         TextColor3 = C.sub,
         Font = FONT,
-        TextSize = 10,
+        TextSize = 11,
         TextXAlignment = Enum.TextXAlignment.Left,
         TextTruncate = Enum.TextTruncate.AtEnd,
     }, card)
@@ -1495,9 +1509,9 @@ function UI.segment(parent, text, options, init, onChange)
             Text = o.text,
             TextColor3 = C.sub,
             Font = FONT_B,
-            TextSize = 10,
+            TextSize = 12,
         }, holder)
-        round(b, 6)
+        round(b, 5)
         btns[o.id] = b
         b.Activated:Connect(function()
             if cur == o.id then return end
@@ -1518,20 +1532,20 @@ function UI.segment(parent, text, options, init, onChange)
 end
 
 function UI.presets(parent, list, onPick)
-    local card = UI.card(parent, 72)
+    local card = UI.card(parent, 82)
     new("TextLabel", {
-        Size = UDim2.new(1, -24, 0, 12),
-        Position = UDim2.fromOffset(12, 4),
+        Size = UDim2.new(1, -24, 0, 14),
+        Position = UDim2.fromOffset(12, 6),
         BackgroundTransparency = 1,
-        Text = "PRESET",
+        Text = "Presets",
         TextColor3 = C.sub,
         Font = FONT_B,
-        TextSize = 9,
+        TextSize = 11,
         TextXAlignment = Enum.TextXAlignment.Left,
     }, card)
     local grid = new("Frame", {
         Size = UDim2.new(1, -16, 0, 26),
-        Position = UDim2.fromOffset(8, 18),
+        Position = UDim2.fromOffset(8, 23),
         BackgroundTransparency = 1,
     }, card)
     new("UIGridLayout", {
@@ -1540,13 +1554,13 @@ function UI.presets(parent, list, onPick)
         SortOrder = Enum.SortOrder.LayoutOrder,
     }, grid)
     local info = new("TextLabel", {
-        Size = UDim2.new(1, -20, 0, 24),
-        Position = UDim2.fromOffset(10, 46),
+        Size = UDim2.new(1, -24, 0, 26),
+        Position = UDim2.fromOffset(12, 53),
         BackgroundTransparency = 1,
         Text = "",
         TextColor3 = C.sub,
         Font = FONT,
-        TextSize = 10,
+        TextSize = 11,
         TextWrapped = true,
         TextXAlignment = Enum.TextXAlignment.Left,
         TextYAlignment = Enum.TextYAlignment.Top,
@@ -1555,13 +1569,14 @@ function UI.presets(parent, list, onPick)
     local chips = {}
     local function select(id)
         for _, p in ipairs(list) do
-            local ch = chips[p.id]
             local on = p.id == id
-            ease(ch.btn, {BackgroundColor3 = on and C.press or C.bg, TextColor3 = on and p.color or C.sub})
-            ease(ch.stroke, {Color = on and p.color or C.stroke})
+            ease(chips[p.id], {
+                BackgroundColor3 = on and C.accent or C.bg,
+                TextColor3 = on and Color3.new(1, 1, 1) or C.sub,
+            })
             if on then info.Text = p.info end
         end
-        if id == nil then info.Text = "Custom - atur manual di bawah." end
+        if id == nil then info.Text = "Custom setup." end
     end
     for i, p in ipairs(list) do
         local b = new("TextButton", {
@@ -1572,11 +1587,10 @@ function UI.presets(parent, list, onPick)
             Text = p.text,
             TextColor3 = C.sub,
             Font = FONT_B,
-            TextSize = 10,
+            TextSize = 12,
         }, grid)
-        round(b, 7)
-        local st = new("UIStroke", {Color = C.stroke, Thickness = 1}, b)
-        chips[p.id] = {btn = b, stroke = st}
+        round(b, 6)
+        chips[p.id] = b
         b.Activated:Connect(function() onPick(p.id) end)
     end
     select(nil)
@@ -1595,14 +1609,10 @@ local function applyStam(mode)
 end
 
 local PLIST = {
-    {id = "supersafe", text = "Safe", color = C.ok,
-        info = "Super Safe: Easy, Stamina Off, 1.05x. Paling aman."},
-    {id = "medium", text = "Medium", color = Color3.fromRGB(163, 230, 53),
-        info = "Medium: Easy, Stamina Off, 1.10x. Aman, boost tipis."},
-    {id = "semi", text = "Semi", color = Color3.fromRGB(56, 189, 248),
-        info = "Semi Safe: Easy, Stamina Semi, 1.10x. Irit, bukan infinity."},
-    {id = "agresif", text = "Agresif", color = C.danger,
-        info = "Agresif: Easy, Stamina Inf, 1.25x. BISA KENA BAN, sesekali aja."},
+    {id = "supersafe", text = "Safe", info = "Easy Control, stamina off, 1.05x speed. Lowest risk."},
+    {id = "medium", text = "Medium", info = "Easy Control, stamina off, 1.10x speed. Light boost."},
+    {id = "semi", text = "Semi", info = "Easy Control, semi stamina, 1.10x speed. Not infinite."},
+    {id = "agresif", text = "Max", info = "Easy Control, infinite stamina, 1.25x. High ban risk, use rarely."},
 }
 local PRESETS = {
     supersafe = {easy = true, stam = "off", speed = true, mult = 1.05},
@@ -1644,11 +1654,11 @@ do
 end
 segStam = UI.segment(pages.Main, "Stamina", {
     {id = "off",  text = "Off",  color = C.off,
-        hint = "Normal"},
-    {id = "semi", text = "Semi", color = Color3.fromRGB(34, 160, 98),
-        hint = string.format("Pakai -%d%% · isi %.1fx (safe)", math.floor((1 - SEMI_USE) * 100 + 0.5), SEMI_REGEN)},
-    {id = "inf",  text = "Inf",  color = Color3.fromRGB(214, 76, 76),
-        hint = "Terkunci penuh (berisiko)"},
+        hint = "Default stamina"},
+    {id = "semi", text = "Semi", color = C.accent,
+        hint = string.format("Drain -%d%%, regen %.1fx", math.floor((1 - SEMI_USE) * 100 + 0.5), SEMI_REGEN)},
+    {id = "inf",  text = "Inf",  color = C.danger,
+        hint = "Always full (risky)"},
 }, cfg.stamMode, function(id)
     userEdit(); applyStam(id)
 end)
@@ -1666,9 +1676,7 @@ do
 end
 
 UI.toggle(pages.QTE, "Stamina QTE", cfg.qStam, function(v) apply("qStam", v, setStam) end,
-    {hint = "Auto tap bintang", counter = "stam"})
-UI.toggle(pages.QTE, "Debug log", env.PanelDebug == true, function(v) env.PanelDebug = v end,
-    {hint = "Log ke console (F9)"})
+    {hint = "Auto-catches the star", counter = "stam"})
 
 do
     local card, y = UI.toggle(pages.Visual, "Soft Light", cfg.light, function(v) apply("light", v, setLight) end, {extra = 34})
